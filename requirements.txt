@@ -11,3 +11,7 @@ cassandra-driver
 matplotlib
 seaborn
 tqdm
+fastapi
+uvicorn
+requests
+pyarrow

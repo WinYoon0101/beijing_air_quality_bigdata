@@ -1,8 +1,28 @@
 import pandas as pd
 import lightgbm as lgb
 import s3fs
+import json
+from pathlib import Path
 from sklearn.model_selection import train_test_split
-from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, BUCKET_NAME
+from config import (
+    BUCKET_NAME,
+    MINIO_ACCESS_KEY,
+    MINIO_ENDPOINT,
+    MINIO_SECRET_KEY,
+    MODEL_LIGHTGBM_PATH,
+    MODEL_METADATA_PATH,
+)
+
+
+def _save_metadata(feature_columns, target_col, categorical_columns):
+    metadata = {
+        "model_name": "lightgbm",
+        "target_col": target_col,
+        "feature_columns": feature_columns,
+        "categorical_columns": categorical_columns,
+        "model_path": str(MODEL_LIGHTGBM_PATH.name),
+    }
+    Path(MODEL_METADATA_PATH).write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def train_lightgbm():
     print("🚀 [LIGHTGBM] Bắt đầu huấn luyện...")
@@ -13,6 +33,7 @@ def train_lightgbm():
     # 2. Đọc dữ liệu (Bỏ s3:// để tránh lỗi pyarrow)
     path = f"{BUCKET_NAME}/gold/features.parquet"
     df = pd.read_parquet(path, filesystem=fs)
+    df = df.ffill().fillna(0)
     
     # 3. Định danh cột mục tiêu (PM2_5 thay vì PM2.5)
     target_col = "PM2_5"
@@ -67,8 +88,9 @@ def train_lightgbm():
     )
     
     # 9. Lưu model
-    model.save_model("model_lightgbm_pm25.txt")
-    print("✅ Đã huấn luyện xong và lưu model: model_lightgbm_pm25.txt")
+    model.save_model(str(MODEL_LIGHTGBM_PATH))
+    _save_metadata(features_columns, target_col, cat_features)
+    print(f"✅ Đã huấn luyện xong và lưu model: {MODEL_LIGHTGBM_PATH.name}")
 
 if __name__ == "__main__":
     train_lightgbm()

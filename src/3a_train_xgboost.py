@@ -1,8 +1,27 @@
 import pandas as pd
 import xgboost as xgb
 import s3fs
+import json
+from pathlib import Path
 from sklearn.model_selection import train_test_split
-from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, BUCKET_NAME
+from config import (
+    BUCKET_NAME,
+    MINIO_ACCESS_KEY,
+    MINIO_ENDPOINT,
+    MINIO_SECRET_KEY,
+    MODEL_METADATA_PATH,
+    MODEL_XGBOOST_PATH,
+)
+
+
+def _save_metadata(feature_columns, target_col):
+    metadata = {
+        "model_name": "xgboost",
+        "target_col": target_col,
+        "feature_columns": feature_columns,
+        "model_path": str(MODEL_XGBOOST_PATH.name),
+    }
+    Path(MODEL_METADATA_PATH).write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def train_xgboost():
     print("🚀 [XGBOOST] Bắt đầu huấn luyện...")
@@ -21,6 +40,7 @@ def train_xgboost():
     
     print(f"📂 Đang đọc dữ liệu từ: {path}")
     df = pd.read_parquet(path, filesystem=fs)
+    df = df.ffill().fillna(0)
     
     # 3. Đổi tên cột mục tiêu (PM2_5 thay vì PM2.5 như đã sửa ở bước Spark)
     target_col = "PM2_5" 
@@ -31,6 +51,7 @@ def train_xgboost():
         return
 
     features_columns = [col for col in df.columns if col not in ['No', 'station', 'wd', target_col]]
+    features_columns = df[features_columns].select_dtypes(include=['number']).columns.tolist()
     
     # 4. Chia tập dữ liệu
     train_data, test = train_test_split(df, test_size=0.1, shuffle=False)
@@ -59,8 +80,9 @@ def train_xgboost():
         early_stopping_rounds=20
     )
     
-    model.save_model("model_xgboost_pm25.json")
-    print("✅ Đã huấn luyện xong và lưu model: model_xgboost_pm25.json")
+    model.save_model(str(MODEL_XGBOOST_PATH))
+    _save_metadata(features_columns, target_col)
+    print(f"✅ Đã huấn luyện xong và lưu model: {MODEL_XGBOOST_PATH.name}")
 
 if __name__ == "__main__":
     train_xgboost()

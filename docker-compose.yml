@@ -6,7 +6,7 @@ services:
     environment:
       MINIO_ROOT_USER: admin
       MINIO_ROOT_PASSWORD: password123
-      volumes:
+    volumes:
       - D:/docker_data/minio:/data # Lưu thẳng vào ổ D
     command: server /data --console-address ":9001"
 
@@ -51,3 +51,102 @@ services:
     environment:
       - GF_INSTALL_PLUGINS=hadesarchitect-cassandra-datasource
     depends_on: [cassandra]
+
+  airflow-postgres:
+    image: postgres:15
+    container_name: airflow_postgres
+    ports: ["5433:5432"]
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - D:/docker_data/airflow-postgres:/var/lib/postgresql/data
+
+  airflow-init:
+    build:
+      context: .
+      dockerfile: docker/airflow/Dockerfile
+    container_name: airflow_init
+    depends_on:
+      - airflow-postgres
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: admin
+      MINIO_SECRET_KEY: password123
+      BUCKET_NAME: air-quality-lake
+      CASSANDRA_HOST: cassandra
+      CASSANDRA_PORT: "9042"
+    volumes:
+      - ./:/opt/airflow/project
+      - ./airflow/dags:/opt/airflow/dags
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate && \
+        if ! airflow users list | grep -q '^admin '; then \
+          airflow users create \
+            --username admin \
+            --password admin \
+            --firstname Air \
+            --lastname Flow \
+            --role Admin \
+            --email admin@example.com; \
+        fi
+
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: docker/airflow/Dockerfile
+    container_name: airflow_webserver
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: admin
+      MINIO_SECRET_KEY: password123
+      BUCKET_NAME: air-quality-lake
+      CASSANDRA_HOST: cassandra
+      CASSANDRA_PORT: "9042"
+    volumes:
+      - ./:/opt/airflow/project
+      - ./airflow/dags:/opt/airflow/dags
+    ports:
+      - "8081:8080"
+    command: webserver
+
+  airflow-scheduler:
+    build:
+      context: .
+      dockerfile: docker/airflow/Dockerfile
+    container_name: airflow_scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: admin
+      MINIO_SECRET_KEY: password123
+      BUCKET_NAME: air-quality-lake
+      CASSANDRA_HOST: cassandra
+      CASSANDRA_PORT: "9042"
+    volumes:
+      - ./:/opt/airflow/project
+      - ./airflow/dags:/opt/airflow/dags
+    command: scheduler

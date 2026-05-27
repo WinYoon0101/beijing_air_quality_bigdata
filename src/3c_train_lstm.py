@@ -10,10 +10,20 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, BUCKET_NAME
 
-# Cấu hình hệ thống
-os.environ["JAVA_HOME"] = r"C:\Program Files\Eclipse Adoptium\jdk-11.0.31.11-hotspot"
-os.environ["HADOOP_HOME"] = r"C:\hadoop"
-os.environ["PATH"] = r"C:\hadoop\bin;" + os.environ.get("PATH", "")
+
+def _configure_runtime():
+    if not os.environ.get("JAVA_HOME"):
+        if os.name == "nt":
+            os.environ["JAVA_HOME"] = r"C:\Program Files\Eclipse Adoptium\jdk-11.0.31.11-hotspot"
+        else:
+            os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-11-openjdk-amd64"
+
+    if os.name == "nt" and not os.environ.get("HADOOP_HOME"):
+        os.environ["HADOOP_HOME"] = r"C:\hadoop"
+        os.environ["PATH"] = r"C:\hadoop\bin;" + os.environ.get("PATH", "")
+
+
+_configure_runtime()
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 class LSTMModel(nn.Module):

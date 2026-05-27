@@ -1,18 +1,26 @@
 import os
 import warnings
 
-# --- 1. CHỈ ĐỊNH RIÊNG JAVA 11 CHO PYSPARK ---
-os.environ["JAVA_HOME"] = r"C:\Program Files\Eclipse Adoptium\jdk-11.0.31.11-hotspot"
 
-# --- 2. CHỈ ĐỊNH HADOOP_HOME VÀ CẤP QUYỀN CHO HADOOP.DLL ---
-hadoop_dir = r"C:\hadoop"
-os.environ["HADOOP_HOME"] = hadoop_dir
-os.environ["PATH"] = hadoop_dir + r"\bin;" + os.environ.get("PATH", "")
+def _configure_runtime():
+    if not os.environ.get("JAVA_HOME"):
+        if os.name == "nt":
+            os.environ["JAVA_HOME"] = r"C:\Program Files\Eclipse Adoptium\jdk-11.0.31.11-hotspot"
+        else:
+            os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-11-openjdk-amd64"
+
+    if os.name == "nt" and not os.environ.get("HADOOP_HOME"):
+        hadoop_dir = r"C:\hadoop"
+        os.environ["HADOOP_HOME"] = hadoop_dir
+        os.environ["PATH"] = hadoop_dir + r"\bin;" + os.environ.get("PATH", "")
+
+
+_configure_runtime()
 
 from pyspark.sql import SparkSession
 from pyspark.sql.window import Window
 from pyspark.sql.functions import col, lag, avg, sum as spark_sum
-from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, BRONZE_PATH, GOLD_PATH
+from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, BRONZE_PATH, GOLD_PATH, SILVER_PATH
 
 warnings.filterwarnings('ignore')
 
@@ -30,6 +38,9 @@ def run_etl():
     
     # --- SỬA LỖI: ĐỔI TÊN CỘT PM2.5 THÀNH PM2_5 ---
     df = df.withColumnRenamed("PM2.5", "PM2_5")
+    clean_df = df.dropna()
+    clean_df.write.mode("overwrite").parquet(SILVER_PATH)
+    df = clean_df
     
     time_cols = ["year", "month", "day", "hour"]
     win_spec = Window.partitionBy("station").orderBy(*time_cols)

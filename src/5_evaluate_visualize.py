@@ -11,12 +11,25 @@ import torch
 import torch.nn as nn
 import s3fs
 import warnings
-from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, BUCKET_NAME
+import json
+from pathlib import Path
+from datetime import datetime
+from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, BUCKET_NAME, MODEL_METRICS_PATH
 
-# --- 1. CẤU HÌNH HỆ THỐNG ---
-os.environ["JAVA_HOME"] = r"C:\Program Files\Eclipse Adoptium\jdk-11.0.31.11-hotspot"
-os.environ["HADOOP_HOME"] = r"C:\hadoop"
-os.environ["PATH"] = r"C:\hadoop\bin;" + os.environ.get("PATH", "")
+
+def _configure_runtime():
+    if not os.environ.get("JAVA_HOME"):
+        if os.name == "nt":
+            os.environ["JAVA_HOME"] = r"C:\Program Files\Eclipse Adoptium\jdk-11.0.31.11-hotspot"
+        else:
+            os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-11-openjdk-amd64"
+
+    if os.name == "nt" and not os.environ.get("HADOOP_HOME"):
+        os.environ["HADOOP_HOME"] = r"C:\hadoop"
+        os.environ["PATH"] = r"C:\hadoop\bin;" + os.environ.get("PATH", "")
+
+
+_configure_runtime()
 
 warnings.filterwarnings('ignore')
 
@@ -113,6 +126,13 @@ def evaluate_models():
             "RMSE": np.sqrt(mean_squared_error(y_true, y_pred)), 
             "R2 Score": r2_score(y_true, y_pred)
         })
+
+    metrics_payload = {
+        "generated_at": datetime.utcnow().isoformat(),
+        "target_col": target_col,
+        "models": results,
+    }
+    Path(MODEL_METRICS_PATH).write_text(json.dumps(metrics_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     
     print("\n✅ KẾT QUẢ ĐÁNH GIÁ CHI TIẾT:")
     print(pd.DataFrame(results))

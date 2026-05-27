@@ -1,130 +1,198 @@
-# --- BƯỚC 1: FIX LỖI PYTHON 3.12 (PHẢI ĐẶT TRÊN CÙNG) ---
-import sys
-try:
-    import asyncore
-except ImportError:
-    import pyasyncore
-    sys.modules['asyncore'] = pyasyncore
-# ------------------------------------------------------
-
+import json
 import os
-import pandas as pd
-import numpy as np
-import lightgbm as lgb
-import s3fs
 import uuid
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import lightgbm as lgb
+import pandas as pd
+import s3fs
+import xgboost as xgb
 from cassandra.cluster import Cluster
-from cassandra.io.asyncioreactor import AsyncioConnection
-from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, BUCKET_NAME, CASSANDRA_HOST
+
+from config import (
+    BUCKET_NAME,
+    CASSANDRA_FORECAST_TABLE,
+    CASSANDRA_HOST,
+    CASSANDRA_KEYSPACE,
+    CASSANDRA_PORT,
+    GOLD_PATH,
+    GOLD_RT_PATH,
+    MINIO_ACCESS_KEY,
+    MINIO_ENDPOINT,
+    MINIO_SECRET_KEY,
+    MODEL_LIGHTGBM_PATH,
+    MODEL_METADATA_PATH,
+    MODEL_XGBOOST_PATH,
+)
+
 
 warnings.filterwarnings('ignore')
 
-def run_batch_inference():
-    print("🚀 [BATCH INFERENCE] Khởi động quy trình dự báo...")
-    
-    # 1. Kết nối và Dọn dẹp Cassandra
-    try:
-        cluster = Cluster([CASSANDRA_HOST], port=9042)
-        cluster.connection_class = AsyncioConnection 
-        session = cluster.connect()
-        
-        session.execute("""
-            CREATE KEYSPACE IF NOT EXISTS air_quality 
-            WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}
-        """)
-        session.execute("""
-            CREATE TABLE IF NOT EXISTS air_quality.pm25_forecast (
-                id UUID PRIMARY KEY, 
-                timestamp timestamp, 
-                actual float, 
-                predicted float
-            )
-        """)
 
-        print("🧹 Đang dọn dẹp dữ liệu cũ...")
-        session.execute("TRUNCATE air_quality.pm25_forecast")
+def _load_metadata():
+    metadata_path = Path(MODEL_METADATA_PATH)
+    if metadata_path.exists():
+        return json.loads(metadata_path.read_text(encoding="utf-8"))
+    return {}
+
+
+def _load_model(model_name):
+    if model_name.lower() == "xgboost":
+        booster = xgb.Booster()
+        booster.load_model(str(MODEL_XGBOOST_PATH))
+        return booster
+
+    return lgb.Booster(model_file=str(MODEL_LIGHTGBM_PATH))
+
+
+def _read_latest_features(fs):
+    for path in [GOLD_RT_PATH, GOLD_PATH]:
+        try:
+            parquet_path = path.replace("s3a://", "")
+            df = pd.read_parquet(parquet_path, filesystem=fs)
+            if not df.empty:
+                return df.tail(1).copy()
+        except Exception:
+            continue
+
+    raise RuntimeError("Không thể đọc feature snapshot từ Gold layer")
+
+
+def _observed_timestamp(row):
+    if all(key in row for key in ["year", "month", "day", "hour"]):
+        return pd.Timestamp(
+            year=int(row["year"]),
+            month=int(row["month"]),
+            day=int(row["day"]),
+            hour=int(row["hour"]),
+        ).to_pydatetime()
+    return datetime.utcnow()
+
+
+def _resolve_features(model, metadata, df):
+    feature_columns = metadata.get("feature_columns")
+    if feature_columns:
+        return feature_columns
+
+    if hasattr(model, "feature_name"):
+        try:
+            feature_columns = list(model.feature_name())
+            if feature_columns:
+                return feature_columns
+        except TypeError:
+            pass
+
+    if hasattr(model, "feature_names") and model.feature_names:
+        return list(model.feature_names)
+
+    excluded = {"No", "PM2_5", "PM2.5"}
+    return [column for column in df.columns if column not in excluded]
+
+
+def run_realtime_inference():
+    print("🚀 [REALTIME INFERENCE] Khởi động quy trình dự báo 1 giờ tới...")
+
+    try:
+        cluster = Cluster([CASSANDRA_HOST], port=CASSANDRA_PORT)
+        session = cluster.connect()
+        session.execute(f"""
+            CREATE KEYSPACE IF NOT EXISTS {CASSANDRA_KEYSPACE}
+            WITH replication = {{'class': 'SimpleStrategy', 'replication_factor': '1'}}
+        """)
+        session.execute(f"""
+            CREATE TABLE IF NOT EXISTS {CASSANDRA_KEYSPACE}.{CASSANDRA_FORECAST_TABLE} (
+                station text,
+                forecast_timestamp timestamp,
+                id UUID,
+                observed_timestamp timestamp,
+                predicted float,
+                model_name text,
+                PRIMARY KEY ((station), forecast_timestamp, id)
+            ) WITH CLUSTERING ORDER BY (forecast_timestamp DESC, id ASC)
+        """)
         print("✅ Cassandra đã sẵn sàng.")
-    except Exception as e:
-        print(f"❌ Thất bại khi kết nối Cassandra: {e}")
+    except Exception as exc:
+        print(f"❌ Thất bại khi kết nối Cassandra: {exc}")
         return
 
-    # 2. Lấy dữ liệu từ Data Lake (MinIO)
-    print("📂 Đang truy xuất dữ liệu từ Gold Layer...")
     try:
         fs = s3fs.S3FileSystem(
-            client_kwargs={'endpoint_url': MINIO_ENDPOINT}, 
-            key=MINIO_ACCESS_KEY, 
-            secret=MINIO_SECRET_KEY
+            client_kwargs={'endpoint_url': MINIO_ENDPOINT},
+            key=MINIO_ACCESS_KEY,
+            secret=MINIO_SECRET_KEY,
         )
-        path = f"{BUCKET_NAME}/gold/features.parquet"
-        df_full = pd.read_parquet(path, filesystem=fs)
-        
-        # Lấy 200 dòng cuối để dự báo
-        df = df_full.tail(200).copy()
-        
-        # Gộp thời gian để làm nhãn hiển thị (nhưng vẫn giữ các cột gốc để làm feature)
-        df['actual_timestamp'] = pd.to_datetime(df[['year', 'month', 'day', 'hour']])
-        
-        start_date = df['actual_timestamp'].min()
-        end_date = df['actual_timestamp'].max()
-        print(f"📅 Dữ liệu thực tế: Từ {start_date} đến {end_date}")
+        df = _read_latest_features(fs)
 
         target_col = "PM2_5"
         if target_col not in df.columns and "PM2.5" in df.columns:
             df = df.rename(columns={"PM2.5": target_col})
-    except Exception as e:
-        print(f"❌ Lỗi đọc dữ liệu: {e}")
+
+        df["observed_timestamp"] = df.apply(_observed_timestamp, axis=1)
+        print(f"📅 Đã lấy snapshot mới nhất tại {df['observed_timestamp'].iloc[0]}")
+    except Exception as exc:
+        print(f"❌ Lỗi đọc dữ liệu: {exc}")
         return
 
-    # 3. Chạy mô hình dự báo (Tự động khớp Feature)
-    print(f"🧠 Đang dự báo bằng LightGBM...")
+    metadata = _load_metadata()
+    model_name = os.getenv("FORECAST_MODEL", metadata.get("model_name", "lightgbm"))
+
     try:
-        model = lgb.Booster(model_file="model_lightgbm_pm25.txt")
-        
-        # Lấy danh sách tên feature mà model yêu cầu
-        expected_features = model.feature_name()
+        model = _load_model(model_name)
+        expected_features = _resolve_features(model, metadata, df)
         print(f"📊 Model yêu cầu {len(expected_features)} features. Đang chuẩn bị dữ liệu...")
 
-        # Ép kiểu dữ liệu category cho các cột cần thiết
-        cat_features = ['station', 'wd']
-        for col in cat_features:
-            if col in df.columns:
-                df[col] = df[col].astype('category')
+        for column in expected_features:
+            if column not in df.columns:
+                df[column] = 0
 
-        # Lọc đúng và đủ các cột mà model cần (bao gồm cả year, month, day, hour nếu có)
-        df_inference = df[expected_features]
-        
-        # Dự báo
-        df['predicted'] = model.predict(df_inference)
+        df_inference = df[expected_features].copy()
+        for column in ["station", "wd"]:
+            if column in df_inference.columns:
+                df_inference[column] = df_inference[column].astype("category")
+
+        if model_name.lower() == "xgboost":
+            df["predicted"] = model.predict(xgb.DMatrix(df_inference))
+        else:
+            df["predicted"] = model.predict(df_inference)
         print("✅ Dự báo thành công.")
-    except Exception as e:
-        print(f"❌ Lỗi dự báo: {e}")
+    except Exception as exc:
+        print(f"❌ Lỗi dự báo: {exc}")
         return
 
-    # 4. Nạp dữ liệu vào Cassandra
-    print(f"💾 Đang nạp {len(df)} bản ghi vào DB...")
-    insert_stmt = session.prepare("""
-        INSERT INTO air_quality.pm25_forecast (id, timestamp, actual, predicted) 
-        VALUES (?, ?, ?, ?)
+    insert_stmt = session.prepare(f"""
+        INSERT INTO {CASSANDRA_KEYSPACE}.{CASSANDRA_FORECAST_TABLE} (
+            station,
+            forecast_timestamp,
+            id,
+            observed_timestamp,
+            predicted,
+            model_name
+        ) VALUES (?, ?, ?, ?, ?, ?)
     """)
-    
+
     count = 0
     for _, row in df.iterrows():
         try:
+            station_value = row["station"] if "station" in row and pd.notna(row["station"]) else "all"
+            observed_timestamp = row["observed_timestamp"]
+            forecast_timestamp = observed_timestamp + timedelta(hours=1)
             session.execute(insert_stmt, [
-                uuid.uuid4(), 
-                row['actual_timestamp'], 
-                float(row[target_col]), 
-                float(row['predicted'])
+                str(station_value),
+                forecast_timestamp,
+                uuid.uuid4(),
+                observed_timestamp,
+                float(row["predicted"]),
+                model_name.lower(),
             ])
             count += 1
-        except Exception as e:
+        except Exception:
             continue
-            
-    print(f"🔥 HOÀN THÀNH! Đã nạp {count} dòng vào Cassandra.")
+
+    print(f"🔥 HOÀN THÀNH! Đã nạp {count} dự báo vào Cassandra.")
     cluster.shutdown()
 
+
 if __name__ == "__main__":
-    run_batch_inference()
+    run_realtime_inference()
