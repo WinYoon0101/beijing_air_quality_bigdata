@@ -14,7 +14,16 @@ import warnings
 import json
 from pathlib import Path
 from datetime import datetime
-from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, BUCKET_NAME, MODEL_METRICS_PATH
+from config import (
+    BUCKET_NAME,
+    MINIO_ACCESS_KEY,
+    MINIO_ENDPOINT,
+    MINIO_SECRET_KEY,
+    MODEL_LIGHTGBM_PATH,
+    MODEL_LSTM_PATH,
+    MODEL_METRICS_PATH,
+    MODEL_XGBOOST_PATH,
+)
 
 
 def _configure_runtime():
@@ -45,6 +54,83 @@ class LSTMModel(nn.Module):
         ula, _ = self.lstm(x)
         return self.fc(ula[:, -1, :])
 
+
+def _predict_xgboost(test_df, target_col):
+    if not Path(MODEL_XGBOOST_PATH).exists():
+        return None
+
+    model = xgb.Booster()
+    model.load_model(str(MODEL_XGBOOST_PATH))
+    feature_names = model.feature_names
+    if not feature_names:
+        feature_names = [c for c in test_df.columns if c not in [target_col, "No", "station", "wd"]]
+
+    for col in feature_names:
+        if col not in test_df.columns:
+            test_df[col] = 0
+
+    return model.predict(xgb.DMatrix(test_df[feature_names]))
+
+
+def _predict_lightgbm(test_df, target_col):
+    if not Path(MODEL_LIGHTGBM_PATH).exists():
+        return None
+
+    model = lgb.Booster(model_file=str(MODEL_LIGHTGBM_PATH))
+    feature_names = model.feature_name()
+    if not feature_names:
+        feature_names = [c for c in test_df.columns if c not in ["No", target_col]]
+
+    for col in feature_names:
+        if col not in test_df.columns:
+            test_df[col] = 0
+
+    df_input = test_df[feature_names].copy()
+    for col in ["station", "wd"]:
+        if col in df_input.columns:
+            df_input[col] = df_input[col].astype("category")
+
+    return model.predict(df_input)
+
+
+def _predict_lstm(test_df, target_col):
+    if not Path(MODEL_LSTM_PATH).exists():
+        return None
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    checkpoint = torch.load(str(MODEL_LSTM_PATH), map_location=device)
+    saved_cols = checkpoint["feature_cols"]
+
+    for col in saved_cols:
+        if col not in test_df.columns:
+            test_df[col] = 0
+
+    data_test = test_df[saved_cols].values
+    seq_len = 48
+    if len(data_test) <= seq_len:
+        return None
+
+    x_lstm = [data_test[i : i + seq_len] for i in range(len(data_test) - seq_len)]
+
+    model = LSTMModel(checkpoint["input_size"], checkpoint["hidden_size"]).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
+    with torch.no_grad():
+        x_tensor = torch.tensor(np.array(x_lstm)).float().to(device)
+        return model(x_tensor).squeeze().cpu().numpy()
+
+
+def _align_predictions(y_true_all, predictions):
+    available = {name: pred for name, pred in predictions.items() if pred is not None and len(pred) > 0}
+    if not available:
+        return None, {}
+
+    min_len = min(len(pred) for pred in available.values())
+    y_true = y_true_all[-min_len:]
+    aligned = {name: pred[-min_len:] for name, pred in available.items()}
+    return y_true, aligned
+
 def evaluate_models():
     print("📊 [EVALUATION] Đang tải tập dữ liệu từ MinIO...")
     fs = s3fs.S3FileSystem(client_kwargs={'endpoint_url': MINIO_ENDPOINT}, 
@@ -63,63 +149,21 @@ def evaluate_models():
     # Làm sạch dữ liệu và sửa lỗi FutureWarning
     test_df = test_df.ffill().fillna(0)
 
-    # 2. CHUẨN BỊ FEATURES CHO TỪNG LOẠI MÔ HÌNH
-    # A. LSTM: Lấy thông tin từ checkpoint đã lưu
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    checkpoint = torch.load("model_lstm_pm25.pth", map_location=device)
-    saved_cols_lstm = checkpoint['feature_cols']
-    
-    # Đảm bảo tập test có đủ các cột như lúc train LSTM (nếu thiếu thì bù 0)
-    for col in saved_cols_lstm:
-        if col not in test_df.columns: 
-            test_df[col] = 0
-            
-    # B. XGBoost: Loại bỏ các cột không phải số và cột định danh
-    # Dùng list comprehension để lấy đúng 53 cột số mà model yêu cầu
-    feats_xgb = [c for c in saved_cols_lstm if c not in [target_col, 'No', 'station', 'wd']]
-    
-    # C. LightGBM: Cần ép kiểu Category cho các cột phân loại
-    feats_lgb = [c for c in df.columns if c not in ['No', target_col]]
-    cat_features = ['station', 'wd']
-    for col in cat_features:
-        if col in test_df.columns:
-            test_df[col] = test_df[col].astype('category')
-
-    # 3. THỰC HIỆN DỰ BÁO
+    # 2. THỰC HIỆN DỰ BÁO
     print("🔮 Đang thực hiện dự báo trên 3 models...")
-    # Thực tế cho y_true (cắt 48 dòng đầu để khớp với cửa sổ trượt của LSTM)
-    y_true = test_df[target_col].values[48:]
-    test_tree = test_df.iloc[48:]
+    preds_dict = {
+        "XGBoost": _predict_xgboost(test_df.copy(), target_col),
+        "LightGBM": _predict_lightgbm(test_df.copy(), target_col),
+        "LSTM": _predict_lstm(test_df.copy(), target_col),
+    }
 
-    # --- Dự báo XGBoost ---
-    xgb_m = xgb.Booster()
-    xgb_m.load_model("model_xgboost_pm25.json")
-    y_pred_xgb = xgb_m.predict(xgb.DMatrix(test_tree[feats_xgb]))
+    y_true, aligned_preds = _align_predictions(test_df[target_col].values, preds_dict)
+    if y_true is None:
+        raise RuntimeError("Không có model nào sẵn sàng để đánh giá. Hãy train ít nhất một model.")
 
-    # --- Dự báo LightGBM ---
-    lgb_m = lgb.Booster(model_file="model_lightgbm_pm25.txt")
-    y_pred_lgb = lgb_m.predict(test_tree[feats_lgb])
-
-    # --- Dự báo LSTM ---
-    # Chuẩn bị dữ liệu đầu vào dạng sequence (48h)
-    data_test_lstm = test_df[saved_cols_lstm].values
-    x_lstm = []
-    for i in range(len(data_test_lstm) - 48):
-        x_lstm.append(data_test_lstm[i : i + 48])
-    
-    lstm_model = LSTMModel(checkpoint['input_size'], checkpoint['hidden_size']).to(device)
-    lstm_model.load_state_dict(checkpoint['model_state_dict'])
-    lstm_model.eval()
-    
-    with torch.no_grad():
-        x_tensor = torch.tensor(np.array(x_lstm)).float().to(device)
-        y_pred_lstm = lstm_model(x_tensor).squeeze().cpu().numpy()
-
-    # 4. TÍNH TOÁN VÀ HIỂN THỊ CHỈ SỐ ĐÁNH GIÁ
+    # 3. TÍNH TOÁN VÀ HIỂN THỊ CHỈ SỐ ĐÁNH GIÁ
     results = []
-    preds_dict = {"XGBoost": y_pred_xgb, "LightGBM": y_pred_lgb, "LSTM": y_pred_lstm}
-    
-    for name, y_pred in preds_dict.items():
+    for name, y_pred in aligned_preds.items():
         results.append({
             "Model": name, 
             "MAE": mean_absolute_error(y_true, y_pred), 
@@ -127,9 +171,11 @@ def evaluate_models():
             "R2 Score": r2_score(y_true, y_pred)
         })
 
+    results = sorted(results, key=lambda row: row["RMSE"])
     metrics_payload = {
         "generated_at": datetime.utcnow().isoformat(),
         "target_col": target_col,
+        "sample_size": int(len(y_true)),
         "models": results,
     }
     Path(MODEL_METRICS_PATH).write_text(json.dumps(metrics_payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -137,16 +183,19 @@ def evaluate_models():
     print("\n✅ KẾT QUẢ ĐÁNH GIÁ CHI TIẾT:")
     print(pd.DataFrame(results))
 
-    # 5. TRỰC QUAN HÓA KẾT QUẢ
+    # 4. TRỰC QUAN HÓA KẾT QUẢ
     sns.set_style("whitegrid")
     plt.figure(figsize=(16, 8))
     
     # Vẽ 150 giờ cuối cùng để dễ quan sát sự khác biệt
     plot_len = 150 
     plt.plot(y_true[-plot_len:], label="Giá trị thực tế", color='black', linewidth=2.5, zorder=1)
-    plt.plot(y_pred_lstm[-plot_len:], label="Dự báo LSTM", color='#e74c3c', alpha=0.9, linewidth=2)
-    plt.plot(y_pred_xgb[-plot_len:], label="Dự báo XGBoost", color='#3498db', alpha=0.7, linestyle='--')
-    plt.plot(y_pred_lgb[-plot_len:], label="Dự báo LightGBM", color='#2ecc71', alpha=0.7, linestyle='-.')
+    if "LSTM" in aligned_preds:
+        plt.plot(aligned_preds["LSTM"][-plot_len:], label="Dự báo LSTM", color='#e74c3c', alpha=0.9, linewidth=2)
+    if "XGBoost" in aligned_preds:
+        plt.plot(aligned_preds["XGBoost"][-plot_len:], label="Dự báo XGBoost", color='#3498db', alpha=0.7, linestyle='--')
+    if "LightGBM" in aligned_preds:
+        plt.plot(aligned_preds["LightGBM"][-plot_len:], label="Dự báo LightGBM", color='#2ecc71', alpha=0.7, linestyle='-.')
     
     plt.title(f"So sánh nồng độ PM2.5 dự báo và thực tế ({plot_len} giờ cuối)", fontsize=14)
     plt.xlabel("Thời gian (Giờ)", fontsize=12)

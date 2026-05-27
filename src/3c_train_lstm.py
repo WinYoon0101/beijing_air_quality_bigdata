@@ -8,7 +8,7 @@ import s3fs
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
-from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, BUCKET_NAME
+from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, BUCKET_NAME, MODEL_LSTM_PATH
 
 
 def _configure_runtime():
@@ -69,7 +69,7 @@ def train_lstm():
 
     # 1. Chia Train/Test (90/10) - Không shuffle để giữ thứ tự thời gian
     train_df, _ = train_test_split(df, test_size=0.1, shuffle=False)
-    train_df = train_df.fillna(method='ffill').fillna(0)
+    train_df = train_df.ffill().fillna(0)
 
     # 2. Xác định danh sách cột số cố định
     feature_cols = train_df.select_dtypes(include=[np.number]).columns.tolist()
@@ -105,8 +105,8 @@ def train_lstm():
         'feature_cols': feature_cols,
         'input_size': input_size,
         'hidden_size': hidden_size
-    }, "model_lstm_pm25.pth")
-    print("✅ Đã lưu model và cấu hình cột.")
+    }, str(MODEL_LSTM_PATH))
+    print(f"✅ Đã lưu model và cấu hình cột tại: {MODEL_LSTM_PATH.name}")
 
 if __name__ == "__main__":
     train_lstm()

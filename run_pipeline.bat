@@ -40,16 +40,24 @@ if "%action%"=="5" (
     cd src
     echo A. XGBoost
     echo B. LightGBM
-    set /p model="Chon mo hinh can huan luyen (A/B): "
+    echo C. LSTM
+    set /p model="Chon mo hinh can huan luyen (A/B/C): "
     if /I "%model%"=="A" set TRAIN_MODEL=xgboost
     if /I "%model%"=="B" set TRAIN_MODEL=lightgbm
+    if /I "%model%"=="C" set TRAIN_MODEL=lstm
     python 3_train_model.py
     set TRAIN_MODEL=
     pause
 )
 if "%action%"=="6" (
     cd src
+    echo A. XGBoost
+    echo B. LightGBM
+    set /p infer_model="Chon model suy luan realtime (A/B): "
+    if /I "%infer_model%"=="A" set FORECAST_MODEL=xgboost
+    if /I "%infer_model%"=="B" set FORECAST_MODEL=lightgbm
     python 4_realtime_inference.py
+    set FORECAST_MODEL=
     pause
 )
 if "%action%"=="7" (

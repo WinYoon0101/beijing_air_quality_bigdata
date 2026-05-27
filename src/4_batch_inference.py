@@ -1,5 +1,6 @@
 import json
 import os
+import argparse
 import uuid
 import warnings
 from datetime import datetime, timedelta
@@ -29,6 +30,7 @@ from config import (
 
 
 warnings.filterwarnings('ignore')
+SUPPORTED_FORECAST_MODELS = {"lightgbm", "xgboost"}
 
 
 def _load_metadata():
@@ -91,7 +93,20 @@ def _resolve_features(model, metadata, df):
     return [column for column in df.columns if column not in excluded]
 
 
-def run_realtime_inference():
+def _resolve_model_name(explicit_model_name, metadata):
+    if explicit_model_name:
+        model_name = explicit_model_name.strip().lower()
+    else:
+        model_name = os.getenv("FORECAST_MODEL", metadata.get("model_name", "lightgbm")).strip().lower()
+
+    if model_name not in SUPPORTED_FORECAST_MODELS:
+        supported = ", ".join(sorted(SUPPORTED_FORECAST_MODELS))
+        raise ValueError(f"Model '{model_name}' không được hỗ trợ cho realtime inference. Hỗ trợ: {supported}")
+
+    return model_name
+
+
+def run_realtime_inference(model_name=None):
     print("🚀 [REALTIME INFERENCE] Khởi động quy trình dự báo 1 giờ tới...")
 
     try:
@@ -136,7 +151,11 @@ def run_realtime_inference():
         return
 
     metadata = _load_metadata()
-    model_name = os.getenv("FORECAST_MODEL", metadata.get("model_name", "lightgbm"))
+    try:
+        model_name = _resolve_model_name(model_name, metadata)
+    except ValueError as exc:
+        print(f"❌ {exc}")
+        return
 
     try:
         model = _load_model(model_name)
@@ -195,4 +214,11 @@ def run_realtime_inference():
 
 
 if __name__ == "__main__":
-    run_realtime_inference()
+    parser = argparse.ArgumentParser(description="Realtime inference cho dự báo PM2.5 T+1")
+    parser.add_argument(
+        "--model",
+        choices=sorted(SUPPORTED_FORECAST_MODELS),
+        help="Model dùng để dự báo realtime (xgboost hoặc lightgbm)",
+    )
+    args = parser.parse_args()
+    run_realtime_inference(model_name=args.model)
