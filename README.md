@@ -1,15 +1,29 @@
 # Hệ dự báo PM2.5 — Bắc Kinh
 
-Pipeline này được chỉnh theo kiến trúc lakehouse + realtime forecast 1 giờ tới: dữ liệu lịch sử đi qua Bronze/Silver/Gold để huấn luyện, dữ liệu API theo giờ đi qua Bronze realtime và hourly ETL để phục vụ dự báo và dashboard. Apache Airflow đóng vai trò scheduler/orchestrator cho cả batch và realtime flow.
+Pipeline này được chỉnh theo kiến trúc lakehouse + realtime forecast 1 giờ tới: dữ liệu lịch sử đi qua Bronze/Silver/Gold để huấn luyện, dữ liệu API theo giờ đi qua Bronze realtime và hourly ETL để phục vụ dự báo và dashboard. Apache Airflow đóng vai trò scheduler/orchestrator cho cả batch và realtime flow. Các script train/eval/inference hiện dùng chung helper schema để giữ Gold batch và Gold realtime đồng nhất.
 
 ## Kiến trúc chính
 - MinIO lưu Bronze, Silver, Gold.
 - Spark ETL tạo Silver và Gold cho dữ liệu lịch sử.
 - XGBoost và LightGBM huấn luyện trên Gold lịch sử.
 - Cassandra lưu forecast T+1 cho dashboard.
-- FastAPI trong `src/main.py` cung cấp API đọc forecast cho Grafana hoặc React/Next.js.
+- FastAPI trong `src/main.py` cung cấp API đọc forecast cho Grafana hoặc React/Next.js, hỗ trợ cả route chuẩn hóa `/forecasts/*` và alias `/api/*`.
 - Airflow trong `airflow/dags/pm25_orchestration_dag.py` điều phối các DAG batch và hourly.
 - Giao diện dashboard web chạy tại `http://localhost:8000` với tab forecast và tab so sánh model.
+
+```mermaid
+flowchart LR
+	RAW[Raw CSV / API] --> PRE[Preprocess]
+	PRE --> BRONZE[Bronze]
+	BRONZE --> SILVER[Silver]
+	SILVER --> GOLD[Gold]
+	GOLD --> TRAIN[Train / Eval]
+	GOLD --> RT[Realtime ETL]
+	RT --> GOLDRT[Gold RT]
+	GOLDRT --> INF[Inference]
+	INF --> CASS[Cassandra]
+	CASS --> API[FastAPI / Dashboard]
+```
 
 ## Yêu cầu
 - Windows
@@ -55,11 +69,11 @@ Mở menu bằng:
 Các bước chính:
 - `0_batch_etl.py`: batch historical flow, tạo Silver/Gold từ Bronze lịch sử.
 - `1_ingest_api.py`: ingest payload realtime vào Bronze.
-- `2_hourly_etl.py`: tạo snapshot features mới nhất cho realtime inference.
+- `2_hourly_etl.py`: tạo snapshot features theo cửa sổ 48 giờ cho realtime inference, dùng chung helper schema với Gold batch.
 - `3_train_model.py`: huấn luyện XGBoost hoặc LightGBM.
 - `4_realtime_inference.py`: dự báo T+1 và ghi vào Cassandra.
 - `main.py`: FastAPI backend cho dashboard.
-- `airflow/dags/pm25_orchestration_dag.py`: DAG batch historical và DAG realtime hourly.
+- `airflow/dags/pm25_orchestration_dag.py`: Airflow điều phối DAG batch historical và DAG realtime hourly.
 
 ## API phục vụ dashboard
 Sau khi có forecast trong Cassandra, chạy:
@@ -94,3 +108,4 @@ Hai DAG chính:
 ## Tài liệu liên quan
 - Kiến trúc chi tiết ở [ARCHITECTURE.md](ARCHITECTURE.md)
 - Mô tả file trong [FILES_EXPLANATION.md](FILES_EXPLANATION.md)
+- Hướng dẫn test dashboard và mock realtime ở [TEST_DASHBOARD.md](TEST_DASHBOARD.md)

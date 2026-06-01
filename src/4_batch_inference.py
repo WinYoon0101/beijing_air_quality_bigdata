@@ -12,6 +12,7 @@ import s3fs
 import xgboost as xgb
 from cassandra.cluster import Cluster
 
+from feature_schema import normalize_pm25_column, prepare_inference_frame, resolve_inference_features
 from config import (
     BUCKET_NAME,
     CASSANDRA_FORECAST_TABLE,
@@ -73,26 +74,6 @@ def _observed_timestamp(row):
     return datetime.utcnow()
 
 
-def _resolve_features(model, metadata, df):
-    feature_columns = metadata.get("feature_columns")
-    if feature_columns:
-        return feature_columns
-
-    if hasattr(model, "feature_name"):
-        try:
-            feature_columns = list(model.feature_name())
-            if feature_columns:
-                return feature_columns
-        except TypeError:
-            pass
-
-    if hasattr(model, "feature_names") and model.feature_names:
-        return list(model.feature_names)
-
-    excluded = {"No", "PM2_5", "PM2.5"}
-    return [column for column in df.columns if column not in excluded]
-
-
 def _resolve_model_name(explicit_model_name, metadata):
     if explicit_model_name:
         model_name = explicit_model_name.strip().lower()
@@ -138,11 +119,7 @@ def run_realtime_inference(model_name=None):
             key=MINIO_ACCESS_KEY,
             secret=MINIO_SECRET_KEY,
         )
-        df = _read_latest_features(fs)
-
-        target_col = "PM2_5"
-        if target_col not in df.columns and "PM2.5" in df.columns:
-            df = df.rename(columns={"PM2.5": target_col})
+        df = normalize_pm25_column(_read_latest_features(fs))
 
         df["observed_timestamp"] = df.apply(_observed_timestamp, axis=1)
         print(f"📅 Đã lấy snapshot mới nhất tại {df['observed_timestamp'].iloc[0]}")
@@ -159,17 +136,10 @@ def run_realtime_inference(model_name=None):
 
     try:
         model = _load_model(model_name)
-        expected_features = _resolve_features(model, metadata, df)
+        expected_features = resolve_inference_features(df, metadata, model_name)
         print(f"📊 Model yêu cầu {len(expected_features)} features. Đang chuẩn bị dữ liệu...")
 
-        for column in expected_features:
-            if column not in df.columns:
-                df[column] = 0
-
-        df_inference = df[expected_features].copy()
-        for column in ["station", "wd"]:
-            if column in df_inference.columns:
-                df_inference[column] = df_inference[column].astype("category")
+        df_inference = prepare_inference_frame(df, expected_features, model_name)
 
         if model_name.lower() == "xgboost":
             df["predicted"] = model.predict(xgb.DMatrix(df_inference))

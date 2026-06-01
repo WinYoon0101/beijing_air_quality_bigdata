@@ -340,6 +340,23 @@
       margin-top: 16px;
     }
 
+    .model-card {
+      padding: 18px;
+      min-height: 560px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .model-chart-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .small-chart {
+      height: 220px;
+    }
+
     .metric-card {
       padding: 18px;
       min-height: 360px;
@@ -434,7 +451,7 @@
     <section class="hero">
       <div class="panel hero-copy">
         <div class="eyebrow">PM2.5 Forecast Control Room</div>
-        <h1>Dashboard dự báo giờ tiếp theo, gọn nhưng đủ sâu.</h1>
+        <h1>Dashboard dự báo giờ tiếp theo</h1>
         <p>
           Web app nhỏ này hiển thị forecast T+1 từ Cassandra, kèm tab so sánh các model hiện có để bạn nhìn được cả đầu ra vận hành lẫn chất lượng train ngay trên một màn hình.
         </p>
@@ -530,31 +547,48 @@
           <span class="badge" id="metricsGeneratedAt">--</span>
         </div>
         <div class="subtext">
-          So sánh 3 chỉ số đang có: MAE, RMSE và R2 Score. Tab này đọc trực tiếp từ file metrics do bước evaluation xuất ra.
+          Tab này lấy dữ liệu theo station đang chọn và hiển thị 3 góc nhìn cho từng model: scatter Actual vs Predicted, phân phối lỗi, và biến động PM2.5 theo thời gian tại trạm đó.
         </div>
 
         <div class="comparison-grid">
-          <div class="metric-card">
+          <div class="card model-card">
             <div class="metric-header">
-              <h3>MAE</h3>
-              <span class="metric-note">Càng thấp càng tốt</span>
+              <h3>XGBoost</h3>
+              <span class="metric-note" id="xgboostMetricBadge">--</span>
             </div>
-            <div class="chart-wrap"><canvas id="maeChart"></canvas></div>
+            <div class="model-chart-grid">
+              <div class="chart-wrap small-chart"><canvas id="xgboostScatterChart"></canvas></div>
+              <div class="chart-wrap small-chart"><canvas id="xgboostResidualChart"></canvas></div>
+            </div>
           </div>
-          <div class="metric-card">
+          <div class="card model-card">
             <div class="metric-header">
-              <h3>RMSE</h3>
-              <span class="metric-note">Càng thấp càng tốt</span>
+              <h3>LightGBM</h3>
+              <span class="metric-note" id="lightgbmMetricBadge">--</span>
             </div>
-            <div class="chart-wrap"><canvas id="rmseChart"></canvas></div>
+            <div class="model-chart-grid">
+              <div class="chart-wrap small-chart"><canvas id="lightgbmScatterChart"></canvas></div>
+              <div class="chart-wrap small-chart"><canvas id="lightgbmResidualChart"></canvas></div>
+            </div>
           </div>
-          <div class="metric-card">
+          <div class="card model-card">
             <div class="metric-header">
-              <h3>R2 Score</h3>
-              <span class="metric-note">Càng cao càng tốt</span>
+              <h3>LSTM</h3>
+              <span class="metric-note" id="lstmMetricBadge">--</span>
             </div>
-            <div class="chart-wrap"><canvas id="r2Chart"></canvas></div>
+            <div class="model-chart-grid">
+              <div class="chart-wrap small-chart"><canvas id="lstmScatterChart"></canvas></div>
+              <div class="chart-wrap small-chart"><canvas id="lstmResidualChart"></canvas></div>
+            </div>
           </div>
+        </div>
+
+        <div class="card chart-card" style="margin-top:16px;">
+          <div class="section-title">
+            <h2>PM2.5 biến động theo thời gian tại station đang chọn</h2>
+            <span class="badge" id="comparisonStationBadge">--</span>
+          </div>
+          <div class="chart-wrap" style="height:360px;"><canvas id="stationSeriesChart"></canvas></div>
         </div>
       </div>
 
@@ -587,9 +621,7 @@
   <script>
     const state = {
       forecastChart: null,
-      maeChart: null,
-      rmseChart: null,
-      r2Chart: null,
+      comparisonCharts: {},
       stations: [],
       currentStation: null,
       comparison: null,
@@ -721,6 +753,161 @@
       });
     }
 
+    function createScatterChart(canvasId, actual, predicted) {
+      if (!actual.length || !predicted.length) {
+        return null;
+      }
+      const ctx = document.getElementById(canvasId);
+      const points = actual.map((value, index) => ({ x: Number(value), y: Number(predicted[index]) }));
+      const minValue = Math.min(...actual, ...predicted);
+      const maxValue = Math.max(...actual, ...predicted);
+      return new Chart(ctx, {
+        type: 'scatter',
+        data: {
+          datasets: [
+            {
+              label: 'Actual vs Predicted',
+              data: points,
+              backgroundColor: 'rgba(83, 211, 255, 0.8)',
+              borderColor: colors.xgb,
+              pointRadius: 4,
+            },
+            {
+              label: 'Perfect fit',
+              type: 'line',
+              data: [{ x: minValue, y: minValue }, { x: maxValue, y: maxValue }],
+              borderColor: 'rgba(255,255,255,0.35)',
+              borderDash: [6, 6],
+              pointRadius: 0,
+              fill: false,
+            }
+          ]
+        },
+        options: {
+          ...getChartBaseOptions('Actual vs Predicted'),
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { title: { display: true, text: 'Actual', color: colors.muted }, ticks: { color: colors.muted }, grid: { color: colors.grid } },
+            y: { title: { display: true, text: 'Predicted', color: colors.muted }, ticks: { color: colors.muted }, grid: { color: colors.grid } },
+          }
+        }
+      });
+    }
+
+    function buildHistogram(values, bins = 12) {
+      if (!values || !values.length) {
+        return { labels: ['0'], counts: [0] };
+      }
+
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      if (min === max) {
+        return { labels: [formatNumber(min)], counts: [values.length] };
+      }
+
+      const width = (max - min) / bins;
+      const counts = Array.from({ length: bins }, () => 0);
+      for (const value of values) {
+        let index = Math.floor((value - min) / width);
+        if (index >= bins) index = bins - 1;
+        if (index < 0) index = 0;
+        counts[index] += 1;
+      }
+
+      const labels = counts.map((_, index) => {
+        const start = min + index * width;
+        const end = start + width;
+        return `${formatNumber(start, 1)} – ${formatNumber(end, 1)}`;
+      });
+
+      return { labels, counts };
+    }
+
+    function createDistributionChart(canvasId, residuals) {
+      const ctx = document.getElementById(canvasId);
+      const histogram = buildHistogram(residuals);
+      return new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: histogram.labels,
+          datasets: [{
+            label: 'Residuals',
+            data: histogram.counts,
+            backgroundColor: 'rgba(139, 92, 246, 0.72)',
+            borderRadius: 10,
+          }]
+        },
+        options: {
+          ...getChartBaseOptions('Residual distribution'),
+          plugins: { legend: { display: false } },
+        }
+      });
+    }
+
+    function createComparisonLineChart(canvasId, labels, actual, models) {
+      if (!labels.length || !actual.length) {
+        return null;
+      }
+      const ctx = document.getElementById(canvasId);
+      return new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            {
+              label: 'Actual',
+              data: actual,
+              borderColor: '#f8fafc',
+              backgroundColor: 'rgba(248,250,252,0.08)',
+              borderWidth: 2.4,
+              pointRadius: 1.5,
+              tension: 0.3,
+              fill: false,
+            },
+            {
+              label: 'XGBoost',
+              data: models.XGBoost || [],
+              borderColor: colors.xgb,
+              backgroundColor: 'rgba(83, 211, 255, 0.08)',
+              borderWidth: 2,
+              pointRadius: 1.5,
+              tension: 0.3,
+              fill: false,
+            },
+            {
+              label: 'LightGBM',
+              data: models.LightGBM || [],
+              borderColor: colors.lgb,
+              backgroundColor: 'rgba(34, 197, 94, 0.08)',
+              borderWidth: 2,
+              pointRadius: 1.5,
+              tension: 0.3,
+              fill: false,
+            },
+            {
+              label: 'LSTM',
+              data: models.LSTM || [],
+              borderColor: colors.lstm,
+              backgroundColor: 'rgba(139, 92, 246, 0.08)',
+              borderWidth: 2,
+              pointRadius: 1.5,
+              tension: 0.3,
+              fill: false,
+            }
+          ]
+        },
+        options: {
+          ...getChartBaseOptions('PM2.5 time series'),
+          plugins: {
+            legend: {
+              display: true,
+              labels: { color: colors.text, usePointStyle: true },
+            }
+          },
+        }
+      });
+    }
+
     function updateForecastChart(history) {
       destroyChart('forecastChart');
       const labels = history.map(item => formatTimestamp(item.forecast_timestamp));
@@ -728,15 +915,55 @@
       state.forecastChart = createLineChart('forecastChart', labels, values);
     }
 
-    function updateMetricCharts(models) {
-      destroyChart('maeChart');
-      destroyChart('rmseChart');
-      destroyChart('r2Chart');
+    function destroyComparisonCharts() {
+      ['xgboostScatterChart', 'xgboostResidualChart', 'lightgbmScatterChart', 'lightgbmResidualChart', 'lstmScatterChart', 'lstmResidualChart', 'stationSeriesChart']
+        .forEach((chartId) => {
+          if (state.comparisonCharts[chartId]) {
+            state.comparisonCharts[chartId].destroy();
+            state.comparisonCharts[chartId] = null;
+          }
+        });
+    }
 
-      const labels = models.map(item => item.Model);
-      state.maeChart = createMetricChart('maeChart', 'MAE', labels, models.map(item => Number(item.MAE)));
-      state.rmseChart = createMetricChart('rmseChart', 'RMSE', labels, models.map(item => Number(item.RMSE)));
-      state.r2Chart = createMetricChart('r2Chart', 'R2 Score', labels, models.map(item => Number(item['R2 Score'])));
+    function updateComparisonCharts(payload) {
+      destroyComparisonCharts();
+      const models = payload.models || [];
+      const lookup = Object.fromEntries(models.map(item => [String(item.Model || '').toLowerCase(), item]));
+      const configs = [
+        { key: 'xgboost', badge: 'xgboostMetricBadge', scatter: 'xgboostScatterChart', residual: 'xgboostResidualChart' },
+        { key: 'lightgbm', badge: 'lightgbmMetricBadge', scatter: 'lightgbmScatterChart', residual: 'lightgbmResidualChart' },
+        { key: 'lstm', badge: 'lstmMetricBadge', scatter: 'lstmScatterChart', residual: 'lstmResidualChart' },
+      ];
+
+      configs.forEach((config) => {
+        const model = lookup[config.key];
+        const badge = document.getElementById(config.badge);
+        const scatterActual = model?.scatter?.actual || [];
+        const scatterPredicted = model?.scatter?.predicted || [];
+        const residuals = model?.residuals || [];
+        if (!model || !scatterActual.length || !scatterPredicted.length) {
+          if (badge) badge.textContent = 'Không có dữ liệu';
+          return;
+        }
+
+        if (badge) {
+          badge.textContent = `MAE ${formatNumber(model.MAE)} · RMSE ${formatNumber(model.RMSE)} · R2 ${formatNumber(model['R2 Score'], 3)}`;
+        }
+
+        state.comparisonCharts[config.scatter] = createScatterChart(config.scatter, scatterActual, scatterPredicted);
+        state.comparisonCharts[config.residual] = createDistributionChart(config.residual, residuals);
+      });
+
+      setText('comparisonStationBadge', payload.station ? `Station ${payload.station}` : '--');
+      const timeline = payload.timeline || { timestamps: [], actual: [], models: {} };
+      state.comparisonCharts.stationSeriesChart = createComparisonLineChart(
+        'stationSeriesChart',
+        timeline.timestamps || [],
+        timeline.actual || [],
+        timeline.models || {}
+      ) || null;
+
+      renderMetricsTable(models);
     }
 
     function renderMetricsTable(models) {
@@ -823,13 +1050,12 @@
       updateForecastUI(forecast, history);
     }
 
-    async function loadModelComparison() {
-      const payload = await fetchJSON('/api/model-comparison');
-      const models = payload.models || [];
+    async function loadModelComparison(station) {
+      const query = station ? `?station=${encodeURIComponent(station)}` : '';
+      const payload = await fetchJSON(`/api/model-comparison${query}`);
       setText('metricsGeneratedAt', payload.generated_at ? `Updated ${formatTimestamp(payload.generated_at)}` : 'Metrics chưa có');
       setText('comparisonUpdated', payload.generated_at ? `Updated ${formatTimestamp(payload.generated_at)}` : 'Model comparison: chưa tải');
-      renderMetricsTable(models);
-      updateMetricCharts(models);
+      updateComparisonCharts(payload);
     }
 
     function activateTab(tabId) {
@@ -847,6 +1073,9 @@
       }
       try {
         await loadForecastData(station);
+        if (document.getElementById('comparisonTab').classList.contains('active')) {
+          await loadModelComparison(station);
+        }
       } catch (error) {
         document.getElementById('forecastEmptyState').style.display = 'block';
         setText('forecastCaption', 'Không tải được forecast. Kiểm tra Cassandra hoặc luồng Airflow hourly.');
@@ -861,7 +1090,7 @@
       try {
         await loadStations();
         await refreshForecast();
-        await loadModelComparison();
+        await loadModelComparison(state.currentStation);
       } catch (error) {
         console.error(error);
         setText('statusValue', 'Offline');
@@ -872,17 +1101,22 @@
       button.addEventListener('click', () => {
         activateTab(button.dataset.tab);
         if (button.dataset.tab === 'comparisonTab') {
-          loadModelComparison().catch(console.error);
+          loadModelComparison(state.currentStation).catch(console.error);
         }
       });
     });
 
-    document.getElementById('stationSelect').addEventListener('change', refreshForecast);
+    document.getElementById('stationSelect').addEventListener('change', async () => {
+      await refreshForecast();
+      if (document.getElementById('comparisonTab').classList.contains('active')) {
+        loadModelComparison(state.currentStation).catch(console.error);
+      }
+    });
     document.getElementById('reloadBtn').addEventListener('click', () => {
       if (document.getElementById('forecastTab').classList.contains('active')) {
         refreshForecast();
       } else {
-        loadModelComparison();
+        loadModelComparison(state.currentStation);
       }
     });
 

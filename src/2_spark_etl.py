@@ -19,7 +19,7 @@ _configure_runtime()
 
 from pyspark.sql import SparkSession
 from pyspark.sql.window import Window
-from pyspark.sql.functions import col, lag, avg, sum as spark_sum
+from pyspark.sql.functions import col, lag, avg, sum as spark_sum, sin, cos, lit
 from config import MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, BRONZE_PATH, GOLD_PATH, SILVER_PATH
 
 warnings.filterwarnings('ignore')
@@ -33,21 +33,24 @@ def run_etl():
         .config("spark.hadoop.fs.s3a.path.style.access", True) \
         .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem").getOrCreate()
 
-    print("🔄 [SPARK ETL] Đang tính Lag/Rolling độc lập theo từng Trạm...")
+    print("🔄 [SPARK ETL] Đang tính Lag/Rolling và đặc trưng chu kỳ theo từng Trạm...")
     df = spark.read.csv(BRONZE_PATH, header=True, inferSchema=True)
     
-    # --- SỬA LỖI: ĐỔI TÊN CỘT PM2.5 THÀNH PM2_5 ---
     df = df.withColumnRenamed("PM2.5", "PM2_5")
     clean_df = df.dropna()
     clean_df.write.mode("overwrite").parquet(SILVER_PATH)
     df = clean_df
+
+    df = df.withColumn("hour_sin", sin(2 * lit(3.141592653589793) * col("hour") / 24))
+    df = df.withColumn("hour_cos", cos(2 * lit(3.141592653589793) * col("hour") / 24))
+    df = df.withColumn("month_sin", sin(2 * lit(3.141592653589793) * col("month") / 12))
+    df = df.withColumn("month_cos", cos(2 * lit(3.141592653589793) * col("month") / 12))
     
     time_cols = ["year", "month", "day", "hour"]
     win_spec = Window.partitionBy("station").orderBy(*time_cols)
     win_roll = Window.partitionBy("station").orderBy(*time_cols).rowsBetween(-1, 0)
     
     lag_cols = [c for c in df.columns if c not in ['No', 'year', 'month', 'day', 'hour']]
-    # Chú ý: Đã đổi tên PM2.5 thành PM2_5 ở danh sách loại trừ bên dưới
     roll_cols = [c for c in df.columns if c not in ['No', 'station', 'wd', 'year', 'month', 'day', 'hour', 'PM2_5']]
     
     # Bọc col(c) để Spark hiểu đây là tên cột một cách an toàn nhất

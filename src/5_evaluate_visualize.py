@@ -14,6 +14,7 @@ import warnings
 import json
 from pathlib import Path
 from datetime import datetime
+from feature_schema import add_next_hour_target
 from config import (
     BUCKET_NAME,
     MINIO_ACCESS_KEY,
@@ -42,6 +43,25 @@ _configure_runtime()
 
 warnings.filterwarnings('ignore')
 
+
+def _load_metadata():
+    metadata_path = Path(MODEL_METRICS_PATH).with_name("model_metadata.json")
+    if metadata_path.exists():
+        return json.loads(metadata_path.read_text(encoding="utf-8"))
+    return {}
+
+
+def _prepare_evaluation_frame(df, target_col):
+    data = add_next_hour_target(df, target_col)
+    if target_col not in data.columns:
+        if target_col in {"PM2_5", "PM2.5"}:
+            base_target = "PM2_5" if "PM2_5" in data.columns else "PM2.5"
+            data[target_col] = data[base_target]
+        else:
+            raise RuntimeError(f"Không thể tạo target '{target_col}' từ dữ liệu hiện tại")
+
+    return data
+
 # --- 2. ĐỊNH NGHĨA CẤU TRÚC LSTM ---
 class LSTMModel(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers=3, target_size=1):
@@ -51,19 +71,46 @@ class LSTMModel(nn.Module):
         self.fc = nn.Linear(hidden_size * 2, target_size)
         
     def forward(self, x):
-        ula, _ = self.lstm(x)
-        return self.fc(ula[:, -1, :])
+        _, (h_out, _) = self.lstm(x)
+        out = torch.cat((h_out[-2, :, :], h_out[-1, :, :]), dim=1)
+        return self.fc(out)
+
+
+def _resolve_xgb_features(model, metadata, test_df, target_col):
+    if getattr(model, "feature_names", None):
+        resolved = [name for name in model.feature_names if name]
+        if resolved:
+            return resolved
+
+    feature_names = metadata.get("feature_columns")
+    if feature_names:
+        return feature_names
+
+    excluded = {target_col, "No", "station", "wd", "year", "month", "day", "hour"}
+    return [column for column in test_df.columns if column not in excluded]
+
+
+def _resolve_lightgbm_features(model, metadata, test_df, target_col):
+    resolved = model.feature_name()
+    if resolved:
+        return list(resolved)
+
+    feature_names = metadata.get("feature_columns")
+    if feature_names:
+        return feature_names
+
+    excluded = {target_col, "No", "year", "month", "day", "hour"}
+    return [column for column in test_df.columns if column not in excluded]
 
 
 def _predict_xgboost(test_df, target_col):
     if not Path(MODEL_XGBOOST_PATH).exists():
         return None
 
+    metadata = _load_metadata()
     model = xgb.Booster()
     model.load_model(str(MODEL_XGBOOST_PATH))
-    feature_names = model.feature_names
-    if not feature_names:
-        feature_names = [c for c in test_df.columns if c not in [target_col, "No", "station", "wd"]]
+    feature_names = _resolve_xgb_features(model, metadata, test_df, target_col)
 
     for col in feature_names:
         if col not in test_df.columns:
@@ -76,10 +123,9 @@ def _predict_lightgbm(test_df, target_col):
     if not Path(MODEL_LIGHTGBM_PATH).exists():
         return None
 
+    metadata = _load_metadata()
     model = lgb.Booster(model_file=str(MODEL_LIGHTGBM_PATH))
-    feature_names = model.feature_name()
-    if not feature_names:
-        feature_names = [c for c in test_df.columns if c not in ["No", target_col]]
+    feature_names = _resolve_lightgbm_features(model, metadata, test_df, target_col)
 
     for col in feature_names:
         if col not in test_df.columns:
@@ -100,19 +146,23 @@ def _predict_lstm(test_df, target_col):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     checkpoint = torch.load(str(MODEL_LSTM_PATH), map_location=device)
     saved_cols = checkpoint["feature_cols"]
+    seq_len = checkpoint.get("seq_length", 48)
 
     for col in saved_cols:
         if col not in test_df.columns:
             test_df[col] = 0
 
     data_test = test_df[saved_cols].values
-    seq_len = 48
     if len(data_test) <= seq_len:
         return None
 
     x_lstm = [data_test[i : i + seq_len] for i in range(len(data_test) - seq_len)]
 
-    model = LSTMModel(checkpoint["input_size"], checkpoint["hidden_size"]).to(device)
+    model = LSTMModel(
+        checkpoint["input_size"],
+        checkpoint["hidden_size"],
+        num_layers=checkpoint.get("num_layers", 3),
+    ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
@@ -139,9 +189,9 @@ def evaluate_models():
     # Đọc dữ liệu từ đường dẫn Gold
     df = pd.read_parquet(f"{BUCKET_NAME}/gold/features.parquet", filesystem=fs)
     
-    target_col = "PM2_5"
-    if target_col not in df.columns: 
-        df = df.rename(columns={"PM2.5": target_col})
+    metadata = _load_metadata()
+    target_col = metadata.get("target_col", "Target_PM2.5_next_1h")
+    df = _prepare_evaluation_frame(df, target_col)
 
     # 1. Tách tập Test (10% cuối - Giữ nguyên trình tự thời gian)
     _, test_df = train_test_split(df, test_size=0.1, shuffle=False)

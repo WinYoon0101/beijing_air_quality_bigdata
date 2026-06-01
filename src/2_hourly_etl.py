@@ -3,7 +3,16 @@ import json
 import pandas as pd
 import s3fs
 
-from config import BUCKET_NAME, GOLD_PATH, GOLD_RT_PATH, MINIO_ACCESS_KEY, MINIO_ENDPOINT, MINIO_SECRET_KEY, BRONZE_RT_PATH
+from feature_schema import add_realtime_feature_history, build_realtime_feature_frame, normalize_pm25_column
+from config import BRONZE_RT_PATH, GOLD_PATH, GOLD_RT_PATH, MINIO_ACCESS_KEY, MINIO_ENDPOINT, MINIO_SECRET_KEY
+
+
+WINDOW_SIZE = 48
+
+
+def _read_parquet(fs, path):
+    parquet_path = path.replace("s3a://", "")
+    return pd.read_parquet(parquet_path, filesystem=fs)
 
 
 def _read_realtime_payload(fs):
@@ -15,28 +24,41 @@ def _read_realtime_payload(fs):
         return None
 
 
+def _flatten_payload(payload):
+    if not isinstance(payload, dict):
+        return {}
+
+    flattened = {}
+    for key, value in payload.items():
+        if isinstance(value, dict):
+            flattened.update({nested_key: nested_value for nested_key, nested_value in value.items() if not isinstance(nested_value, dict)})
+
+    for key, value in payload.items():
+        if not isinstance(value, dict):
+            flattened[key] = value
+
+    return flattened
+
+
 def run_hourly_etl():
-    print("🔄 [HOURLY ETL] Đang tạo snapshot features mới nhất...")
+    print("🔄 [HOURLY ETL] Đang tạo snapshot features với cửa sổ 48 giờ gần nhất...")
     fs = s3fs.S3FileSystem(
         client_kwargs={"endpoint_url": MINIO_ENDPOINT},
         key=MINIO_ACCESS_KEY,
         secret=MINIO_SECRET_KEY,
     )
 
-    historical_path = f"{BUCKET_NAME}/gold/features.parquet"
-    df = pd.read_parquet(historical_path, filesystem=fs)
-    latest = df.tail(1).copy().reset_index(drop=True)
-
+    historical_df = normalize_pm25_column(_read_parquet(fs, GOLD_PATH))
     payload = _read_realtime_payload(fs)
-    if isinstance(payload, dict):
-        for column in ["station", "wd", "year", "month", "day", "hour", "PM2_5", "PM2.5"]:
-            if column in payload:
-                target_column = "PM2_5" if column == "PM2.5" else column
-                latest.loc[0, target_column] = payload[column]
+    feature_frame = build_realtime_feature_frame(historical_df, _flatten_payload(payload), window_size=WINDOW_SIZE)
+    feature_frame = add_realtime_feature_history(feature_frame).dropna().tail(WINDOW_SIZE).reset_index(drop=True)
+
+    if len(feature_frame) < WINDOW_SIZE:
+        raise RuntimeError(f"Không thể tạo đủ {WINDOW_SIZE} hàng feature cho snapshot realtime")
 
     output_path = GOLD_RT_PATH.replace("s3a://", "")
-    latest.to_parquet(output_path, filesystem=fs, index=False)
-    print(f"✅ [HOURLY ETL] Đã lưu snapshot tại {GOLD_RT_PATH}")
+    feature_frame.to_parquet(output_path, filesystem=fs, index=False)
+    print(f"✅ [HOURLY ETL] Đã lưu snapshot {WINDOW_SIZE} giờ tại {GOLD_RT_PATH}")
 
 
 if __name__ == "__main__":
