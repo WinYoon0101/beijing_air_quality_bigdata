@@ -20,9 +20,7 @@ from config import (
     MODEL_LIGHTGBM_PATH,
 )
 
-
 warnings.filterwarnings('ignore')
-
 
 def _save_metadata(feature_columns, target_col):
     metadata = {
@@ -31,21 +29,21 @@ def _save_metadata(feature_columns, target_col):
         "feature_columns": feature_columns,
         "model_path": str(MODEL_LIGHTGBM_PATH.name),
     }
-    Path(MODEL_METADATA_PATH).write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-
+    # Tự động lưu thành: metadata_lightgbm.json
+    save_path = Path(MODEL_METADATA_PATH).with_name("metadata_lightgbm.json")
+    save_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def _prepare_training_frame(df):
     target_col = "Target_PM2.5_next_1h"
     data = add_next_hour_target(df, target_col)
     data = data.dropna(subset=[target_col]).reset_index(drop=True)
-
     return data, target_col
 
-
 def train_lightgbm():
-    print("🚀 [LIGHTGBM] Bắt đầu huấn luyện mô hình FINAL (Production Mode)...")
+    print("🚀 [HỆ THỐNG] Bắt đầu khởi động luồng huấn luyện LightGBM...")
 
     # 1. Kết nối MinIO
+    print("🔗 [BƯỚC 1/6] Đang kết nối với MinIO Data Lake...")
     fs = s3fs.S3FileSystem(
         client_kwargs={'endpoint_url': MINIO_ENDPOINT},
         key=MINIO_ACCESS_KEY,
@@ -53,26 +51,29 @@ def train_lightgbm():
     )
 
     path = f"{BUCKET_NAME}/gold/features.parquet"
-    print(f"📂 Đang đọc dữ liệu từ: {path}")
+    print(f"📥 [BƯỚC 2/6] Đang tải dữ liệu Gold từ: {path}")
     df = pd.read_parquet(path, filesystem=fs)
     
     # 2. Xử lý đặc trưng
+    print("⚙️ [BƯỚC 3/6] Đang tiền xử lý và chuẩn hóa các đặc trưng (Features)...")
     data, target_col = _prepare_training_frame(df)
 
-    for column in ['wd', 'station']:
-        if column in data.columns:
-            data[column] = data[column].astype('category')
+    # TUYỆT CHIÊU FIX LỖI: Tự động gom tất cả các cột chuỗi (string/object) thành Category
+    categorical_cols = data.select_dtypes(include=['object', 'string']).columns
+    for col in categorical_cols:
+        data[col] = data[col].astype('category')
+    print(f"   🪄 Đã tự động ép kiểu {len(categorical_cols)} cột văn bản sang định dạng Category.")
 
-    excluded_columns = {'No', target_col, 'year', 'month', 'day', 'hour', 'PM2.5', 'PM2_5'}
+    excluded_columns = {'No', target_col, 'year', 'month', 'day', 'hour'}
     features_columns = [col for col in data.columns if col not in excluded_columns]
 
     if not features_columns:
         raise RuntimeError("Không tìm thấy cột nào trong Gold layer để huấn luyện LightGBM")
 
     # 3. Chia dữ liệu (90/10)
+    print("🪓 [BƯỚC 4/6] Đang chia tách tập dữ liệu Train/Validation/Test...")
     train_data, test = train_test_split(data, test_size=0.1, shuffle=False)
     
-    print("\n🏆 Áp dụng BỘ THAM SỐ VÀNG từ Kaggle...")
     best_p = {
         'learning_rate': 0.03900319833456263,
         'max_depth': 9,
@@ -87,8 +88,10 @@ def train_lightgbm():
         'verbose': -1,
         'seed': 42,
     }
-
-    print("\n⏳ Đang huấn luyện mô hình FINAL duy nhất...")
+    
+    print("\n🏆 Đã nạp BỘ THAM SỐ VÀNG từ Kaggle.")
+    print("🔥 [BƯỚC 5/6] ĐANG HUẤN LUYỆN MÔ HÌNH (Training in progress)...")
+    
     # Tách Validation ra từ Train (10% của tập Train) để giám sát Early Stopping
     train_final, val_final = train_test_split(train_data, test_size=0.1, shuffle=False)
 
@@ -109,6 +112,7 @@ def train_lightgbm():
     )
 
     # 5. Đánh giá tập Test
+    print("\n🧪 [BƯỚC 6/6] Đang kiểm thử sức mạnh mô hình trên tập dữ liệu ẩn (Test Set)...")
     preds = final_model.predict(test[features_columns])
 
     rmse_score = np.sqrt(mse(test[target_col], preds))
@@ -124,12 +128,12 @@ def train_lightgbm():
     print("-" * 55)
 
     # 6. Lưu mô hình và Metadata
+    print(" Đang đóng gói Model và xuất file Metadata...")
     MODEL_LIGHTGBM_PATH.parent.mkdir(parents=True, exist_ok=True)
     final_model.save_model(str(MODEL_LIGHTGBM_PATH))
     _save_metadata(features_columns, target_col)
     
-    print(f"✅ Đã huấn luyện xong và lưu model tại: {MODEL_LIGHTGBM_PATH.parent}")
-
+    print(f"✅ HOÀN TẤT! Mô hình đã sẵn sàng lên sóng tại: {MODEL_LIGHTGBM_PATH.parent}")
 
 if __name__ == "__main__":
     train_lightgbm()

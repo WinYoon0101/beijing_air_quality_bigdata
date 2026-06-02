@@ -52,31 +52,3 @@ with DAG(
     )
 
     preprocess >> ingest_bronze >> batch_etl >> train_model >> evaluate
-
-
-with DAG(
-    dag_id="pm25_hourly_forecast",
-    default_args=default_args,
-    description="Hourly realtime forecast pipeline for PM2.5 T+1",
-    start_date=datetime(2026, 1, 1),
-    schedule_interval="0 * * * *",
-    catchup=False,
-    max_active_runs=1,
-    tags=["pm25", "realtime", "forecast"],
-) as hourly_dag:
-    ingest_api = BashOperator(
-        task_id="ingest_api_payload",
-        bash_command=f"cd {PROJECT_DIR} && python 1_ingest_api.py",
-    )
-
-    hourly_etl = BashOperator(
-        task_id="run_hourly_etl",
-        bash_command=f"cd {PROJECT_DIR} && python 2_hourly_etl.py",
-    )
-
-    realtime_inference = BashOperator(
-        task_id="run_realtime_inference",
-        bash_command=f"cd {PROJECT_DIR} && python 4_realtime_inference.py",
-    )
-
-    ingest_api >> hourly_etl >> realtime_inference

@@ -16,10 +16,8 @@ BUCKET_NAME = os.getenv("BUCKET_NAME", "air-quality-lake")
 
 # Đường dẫn Data Lake
 BRONZE_PATH = f"s3a://{BUCKET_NAME}/bronze/airquality_data.csv"
-BRONZE_RT_PATH = f"s3a://{BUCKET_NAME}/bronze/realtime/latest.json"
 SILVER_PATH = f"s3a://{BUCKET_NAME}/silver/cleaned_data.parquet"
 GOLD_PATH = f"s3a://{BUCKET_NAME}/gold/features.parquet"
-GOLD_RT_PATH = f"s3a://{BUCKET_NAME}/gold/realtime/latest_features.parquet"
 
 
 # Đường dẫn model và metadata
@@ -29,18 +27,3 @@ MODEL_LIGHTGBM_PATH = MODEL_DIR / "model_lightgbm_pm25.txt"
 MODEL_LSTM_PATH = MODEL_DIR / "model_lstm_pm25.pth"
 MODEL_METADATA_PATH = MODEL_DIR / "model_metadata.json"
 MODEL_METRICS_PATH = MODEL_DIR / "model_metrics.json"
-
-
-# Cấu hình Cassandra
-CASSANDRA_HOST = os.getenv("CASSANDRA_HOST", "localhost")
-CASSANDRA_PORT = int(os.getenv("CASSANDRA_PORT", "9042"))
-CASSANDRA_KEYSPACE = os.getenv("CASSANDRA_KEYSPACE", "air_quality")
-CASSANDRA_FORECAST_TABLE = os.getenv("CASSANDRA_FORECAST_TABLE", "pm25_forecast_hourly")
-
-
-# Cấu hình API realtime
-WEATHER_API_URL = os.getenv("WEATHER_API_URL", "")
-AQI_API_URL = os.getenv("AQI_API_URL", "")
-
-
-#(Tài khoản/Mật khẩu mặc định thường là admin / admin)

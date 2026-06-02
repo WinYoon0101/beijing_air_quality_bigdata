@@ -15,9 +15,9 @@ services:
     image: apache/spark:latest
     container_name: spark_master
     environment:
-      - SPARK_MODE=master
+      - SPARK_NO_DAEMONIZE=true
     ports:
-      - "8080:8080"
+      - "8082:8080"
       - "7077:7077"
     command: /opt/spark/sbin/start-master.sh
 
@@ -26,8 +26,7 @@ services:
     image: apache/spark:latest
     container_name: spark_worker
     environment:
-      - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_NO_DAEMONIZE=true
       - SPARK_WORKER_MEMORY=4G
       - SPARK_WORKER_CORES=2
     depends_on:

@@ -1,28 +1,24 @@
 # Hệ dự báo PM2.5 — Bắc Kinh
 
-Pipeline này được chỉnh theo kiến trúc lakehouse + realtime forecast 1 giờ tới: dữ liệu lịch sử đi qua Bronze/Silver/Gold để huấn luyện, dữ liệu API theo giờ đi qua Bronze realtime và hourly ETL để phục vụ dự báo và dashboard. Apache Airflow đóng vai trò scheduler/orchestrator cho cả batch và realtime flow. Các script train/eval/inference hiện dùng chung helper schema để giữ Gold batch và Gold realtime đồng nhất.
+Pipeline lakehouse batch: dữ liệu lịch sử đi qua Bronze/Silver/Gold để huấn luyện, đánh giá và inference batch. Apache Airflow điều phối DAG `pm25_historical_training` (preprocess → ingest → ETL → train → evaluate). Task train gọi `3_train_model.py` với mặc định **LightGBM** khi không set `TRAIN_MODEL`. Các script dùng chung helper trong `feature_schema.py`.
 
 ## Kiến trúc chính
 - MinIO lưu Bronze, Silver, Gold.
 - Spark ETL tạo Silver và Gold cho dữ liệu lịch sử.
 - XGBoost và LightGBM huấn luyện trên Gold lịch sử.
-- Cassandra lưu forecast T+1 cho dashboard.
-- FastAPI trong `src/main.py` cung cấp API đọc forecast cho Grafana hoặc React/Next.js, hỗ trợ cả route chuẩn hóa `/forecasts/*` và alias `/api/*`.
-- Airflow trong `airflow/dags/pm25_orchestration_dag.py` điều phối các DAG batch và hourly.
+- FastAPI trong `src/main.py` phục vụ dashboard so sánh model (MAE, RMSE, R², scatter, timeline).
+- Airflow trong `airflow/dags/pm25_orchestration_dag.py` điều phối DAG batch `pm25_historical_training`.
 - Giao diện dashboard web chạy tại `http://localhost:8000` với tab forecast và tab so sánh model.
 
 ```mermaid
 flowchart LR
-	RAW[Raw CSV / API] --> PRE[Preprocess]
+	RAW[Raw CSV] --> PRE[Preprocess]
 	PRE --> BRONZE[Bronze]
 	BRONZE --> SILVER[Silver]
 	SILVER --> GOLD[Gold]
 	GOLD --> TRAIN[Train / Eval]
-	GOLD --> RT[Realtime ETL]
-	RT --> GOLDRT[Gold RT]
-	GOLDRT --> INF[Inference]
-	INF --> CASS[Cassandra]
-	CASS --> API[FastAPI / Dashboard]
+	GOLD --> EVAL[Evaluate]
+	EVAL --> API[FastAPI Dashboard]
 ```
 
 ## Yêu cầu
@@ -47,14 +43,14 @@ pip install -r requirements.txt
 ## Cấu hình
 Các hằng chính nằm trong `src/config.py`:
 - `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `BUCKET_NAME`
-- `BRONZE_PATH`, `SILVER_PATH`, `GOLD_PATH`, `GOLD_RT_PATH`
-- `MODEL_XGBOOST_PATH`, `MODEL_LIGHTGBM_PATH`, `MODEL_METADATA_PATH`
-- `CASSANDRA_HOST`, `CASSANDRA_PORT`, `CASSANDRA_KEYSPACE`, `CASSANDRA_FORECAST_TABLE`
-- `WEATHER_API_URL`, `AQI_API_URL`
+- `BRONZE_PATH`, `SILVER_PATH`, `GOLD_PATH`
+- `MODEL_XGBOOST_PATH`, `MODEL_LIGHTGBM_PATH`, `MODEL_METRICS_PATH`, `MODEL_METADATA_PATH`
 
 ## Khởi động hạ tầng
 ```powershell
 docker-compose up -d
+
+docker-compose up -d --build
 ```
 
 MinIO, Spark master/worker, Cassandra, Grafana và Airflow sẽ chạy theo `docker-compose.yml`.
@@ -68,44 +64,40 @@ Mở menu bằng:
 
 Các bước chính:
 - `0_batch_etl.py`: batch historical flow, tạo Silver/Gold từ Bronze lịch sử.
-- `1_ingest_api.py`: ingest payload realtime vào Bronze.
-- `2_hourly_etl.py`: tạo snapshot features theo cửa sổ 48 giờ cho realtime inference, dùng chung helper schema với Gold batch.
-- `3_train_model.py`: huấn luyện XGBoost hoặc LightGBM.
-- `4_realtime_inference.py`: dự báo T+1 và ghi vào Cassandra.
-- `main.py`: FastAPI backend cho dashboard.
-- `airflow/dags/pm25_orchestration_dag.py`: Airflow điều phối DAG batch historical và DAG realtime hourly.
+- `3_train_model.py`: huấn luyện XGBoost, LightGBM hoặc LSTM (mặc định LightGBM).
+- `5_evaluate_visualize.py`: đánh giá, lưu `model_metrics.json` và xuất biểu đồ PNG.
+- `main.py`: FastAPI dashboard so sánh model (không còn endpoint dự báo realtime).
+- `airflow/dags/pm25_orchestration_dag.py`: Airflow chạy preprocess → ingest → ETL → train (LightGBM mặc định) → evaluate.
 
 ## API phục vụ dashboard
-Sau khi có forecast trong Cassandra, chạy:
+Sau khi train model và chạy evaluate (tùy chọn), khởi động API:
 
 ```powershell
 cd src
+python 5_evaluate_visualize.py
 python main.py
 ```
 
-Sau đó dashboard web ở `http://localhost:8000` có thể đọc:
+Dashboard tại `http://localhost:8000`:
 - `GET /health`
-- `GET /forecasts/latest?station=<station_name>`
-- `GET /forecasts/history?station=<station_name>&limit=24`
 - `GET /api/stations`
-- `GET /api/model-comparison`
+- `GET /api/model-comparison?station=` (để trống = toàn bộ test set)
+- `GET /api/metrics-file` (đọc `model_metrics.json`)
 
-Dashboard có 2 tab:
-- Dự báo giờ tiếp theo: hiển thị forecast T+1 và timeline gần nhất
-- So sánh model: hiển thị biểu đồ MAE, RMSE, R2 Score từ file metrics
+Biểu đồ: MAE/RMSE/R², đường Actual vs Predicted, scatter và phân phối lỗi từng model (tương tự script evaluate).
 
 ## Airflow
 Airflow web UI chạy tại `http://localhost:8081` sau khi khởi động stack.
-Hai DAG chính:
-- `pm25_historical_training`
-- `pm25_hourly_forecast`
+
+DAG chính: `pm25_historical_training` — trigger thủ công (`schedule_interval=None`). Chuỗi task huấn luyện gọi `3_train_model.py` không set `TRAIN_MODEL`, nên **mặc định train LightGBM**.
 
 ## Lưu ý vận hành
-- `1_ingestion_minio.py` hỗ trợ hai chế độ: historical và `INGEST_MODE=api`.
-- `4_batch_inference.py` ghi forecast T+1 theo từng station vào Cassandra.
-- `3a_train_xgboost.py` và `3b_train_lightgbm.py` đều lưu metadata để inference khớp feature.
+- `1_ingestion_minio.py` upload dữ liệu lịch sử lên Bronze.
+- `evaluation_data.py` dùng chung cho `5_evaluate_visualize.py` và API dashboard.
+- `3a_train_xgboost.py` và `3b_train_lightgbm.py` lưu metadata phục vụ đánh giá.
 
 ## Tài liệu liên quan
-- Kiến trúc chi tiết ở [ARCHITECTURE.md](ARCHITECTURE.md)
-- Mô tả file trong [FILES_EXPLANATION.md](FILES_EXPLANATION.md)
-- Hướng dẫn test dashboard và mock realtime ở [TEST_DASHBOARD.md](TEST_DASHBOARD.md)
+- Thuyết trình: [THUYET_TRINH_DU_AN.md](THUYET_TRINH_DU_AN.md)
+- Kiến trúc chi tiết: [ARCHITECTURE.md](ARCHITECTURE.md)
+- Mô tả file: [FILES_EXPLANATION.md](FILES_EXPLANATION.md)
+- Hướng dẫn test: [HUONG_DAN_TEST_DU_AN.md](HUONG_DAN_TEST_DU_AN.md)

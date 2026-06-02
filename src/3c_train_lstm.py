@@ -1,5 +1,6 @@
 import os
 import json
+import warnings
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -15,7 +16,7 @@ from sklearn.metrics import mean_squared_error as mse
 from joblib import dump
 from torch.utils.data import Dataset, DataLoader
 
-from feature_schema import add_next_hour_target, sort_by_time
+from feature_schema import add_next_hour_target
 from config import (
     MINIO_ENDPOINT, 
     MINIO_ACCESS_KEY, 
@@ -33,10 +34,14 @@ def _configure_runtime():
             os.environ["JAVA_HOME"] = "/usr/lib/jvm/java-11-openjdk-amd64"
 
     if os.name == "nt" and not os.environ.get("HADOOP_HOME"):
-        os.environ["HADOOP_HOME"] = r"C:\hadoop"
-        os.environ["PATH"] = r"C:\hadoop\bin;" + os.environ.get("PATH", "")
+        hadoop_dir = r"C:\hadoop"
+        os.environ["HADOOP_HOME"] = hadoop_dir
+        os.environ["PATH"] = hadoop_dir + r"\bin;" + os.environ.get("PATH", "")
+        # Bịt mắt file cấu hình XML bị lỗi ở ổ C (Phòng hờ cho s3fs)
+        os.environ["HADOOP_CONF_DIR"] = hadoop_dir + r"\bin"
 
 _configure_runtime()
+warnings.filterwarnings('ignore')
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 def _save_metadata(feature_cols, target_col):
@@ -66,7 +71,7 @@ class LSTMModel(nn.Module):
 def create_sequences(df, feature_cols, target_column, seq_length=48):
     sequences = []
     if "station" in df.columns:
-        for _, group in tqdm(df.groupby("station", sort=False), desc="Tạo chuỗi theo station"):
+        for _, group in tqdm(df.groupby("station", sort=False), desc="   ⏳ Tạo chuỗi theo trạm"):
             arr = group[feature_cols].values
             targets = group[target_column].values
             for i in range(len(arr) - seq_length):
@@ -76,7 +81,7 @@ def create_sequences(df, feature_cols, target_column, seq_length=48):
     else:
         arr = df[feature_cols].values
         targets = df[target_column].values
-        for i in tqdm(range(len(arr) - seq_length), desc="Tạo chuỗi"):
+        for i in tqdm(range(len(arr) - seq_length), desc="   ⏳ Tạo chuỗi"):
             seq = arr[i : i + seq_length]
             label = targets[i + seq_length]
             sequences.append((seq, label))
@@ -91,28 +96,38 @@ class AirQualityDataset(Dataset):
         seq, target = self.sequences[idx]
         return torch.tensor(seq).float(), torch.tensor(target).float()
 
+
 def train_lstm():
-    print(f"🚀 [LSTM] Thiết bị: {DEVICE}")
+    print(f"🚀 [HỆ THỐNG] Bắt đầu khởi động luồng huấn luyện Deep Learning (LSTM)...")
+    print(f"💻 [PHẦN CỨNG] Đang sử dụng thiết bị xử lý: {DEVICE.upper()}")
+
+    # 1. Kết nối MinIO
+    print("\n🔗 [BƯỚC 1/6] Đang kết nối với MinIO Data Lake...")
     fs = s3fs.S3FileSystem(client_kwargs={'endpoint_url': MINIO_ENDPOINT}, 
                            key=MINIO_ACCESS_KEY, secret=MINIO_SECRET_KEY)
-    df = pd.read_parquet(f"{BUCKET_NAME}/gold/features.parquet", filesystem=fs)
+    
+    path = f"{BUCKET_NAME}/gold/features.parquet"
+    print(f"📥 [BƯỚC 2/6] Đang tải dữ liệu Gold từ: {path}")
+    df = pd.read_parquet(path, filesystem=fs)
+    
     target_col = "Target_PM2.5_next_1h"
     df = add_next_hour_target(df, target_col)
     df = df.dropna(subset=[target_col]).reset_index(drop=True)
 
-    # 2. Time-based split
+    # 2. Time-based split & Tiền xử lý
+    print("⚙️ [BƯỚC 3/6] Đang tiền xử lý, chuẩn hóa (Scaling) và tách đặc trưng số...")
     train, temp = train_test_split(df, test_size=0.2, shuffle=False)
     val, test = train_test_split(temp, test_size=0.5, shuffle=False)
+    
     train = train.ffill().fillna(0)
     val = val.ffill().fillna(0)
     test = test.ffill().fillna(0)
 
-    # 3. Chọn feature đã có sẵn trong Gold layer
     excluded_cols = {"No", "year", "month", "day", "hour", target_col, "PM2_5", "PM2.5"}
     feature_cols = [col for col in train.select_dtypes(include=[np.number]).columns if col not in excluded_cols]
     input_size = len(feature_cols)
     hidden_size = 100
-    print(f"📋 Model học trên {input_size} cột đặc trưng.")
+    print(f"   🪄 Đã xác định {input_size} đặc trưng (Features) đưa vào mô hình.")
 
     # 4. Scaling
     scaler_X = MinMaxScaler()
@@ -139,6 +154,7 @@ def train_lstm():
     test_scaled[target_col] = test_y.ravel()
 
     # 5. Tạo sequences và DataLoader
+    print("🪓 [BƯỚC 4/6] Đang cắt dữ liệu thành các chuỗi thời gian (Time-series Sequences)...")
     train_seq = create_sequences(train_scaled, feature_cols, target_col)
     val_seq = create_sequences(val_scaled, feature_cols, target_col)
     test_seq = create_sequences(test_scaled, feature_cols, target_col)
@@ -149,19 +165,20 @@ def train_lstm():
 
     model = LSTMModel(input_size=input_size, hidden_size=hidden_size).to(DEVICE)
     
-    #  6. Áp dụng AdamW (weight_decay 1e-4) + CosineAnnealingLR + HuberLoss
+    # 6. Huấn luyện Model
     epochs = 60
     optimizer = AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
     criterion = nn.HuberLoss()
-    
-    # 7. Huấn luyện với validation và checkpoint
     best_val_rmse = float('inf')
+    model_path = Path(MODEL_LSTM_PATH)
+    
+    print(f"\n🔥 [BƯỚC 5/6] ĐANG HUẤN LUYỆN MÔ HÌNH LSTM ({epochs} Epochs)...")
     
     for epoch in range(epochs):
         model.train()
         epoch_loss = 0
-        for seq, labels in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}"):
+        for seq, labels in tqdm(train_loader, desc=f"   🔄 Epoch {epoch+1:02d}/{epochs}"):
             seq, labels = seq.to(DEVICE), labels.to(DEVICE)
             optimizer.zero_grad()
             
@@ -174,8 +191,6 @@ def train_lstm():
             epoch_loss += loss.item() * seq.size(0)
             
         train_loss_epoch = epoch_loss / len(train_loader.dataset)
-        
-        #  Cập nhật tốc độ học
         scheduler.step()
 
         # Validation
@@ -198,7 +213,7 @@ def train_lstm():
             val_targets_inv = scaler_y.inverse_transform(val_targets)
             val_rmse_real = float(np.sqrt(mse(val_targets_inv, val_preds_inv)))
 
-        print(f"Epoch {epoch+1}/{epochs} | Train HuberLoss: {train_loss_epoch:.6f} | Val RMSE: {val_rmse_real:.4f}")
+        print(f"   => 📊 Train HuberLoss: {train_loss_epoch:.6f} | Val RMSE: {val_rmse_real:.4f}")
 
         # Lưu checkpoint và scalers nếu tốt hơn
         if not np.isnan(val_rmse_real) and val_rmse_real < best_val_rmse:
@@ -212,7 +227,6 @@ def train_lstm():
                 'seq_length': 48,
                 'target_col': target_col,
             }
-            model_path = Path(MODEL_LSTM_PATH)
             model_path.parent.mkdir(parents=True, exist_ok=True)
             torch.save(model_dict, str(model_path))
             
@@ -221,11 +235,18 @@ def train_lstm():
             
             dump(scaler_X, str(scaler_x_path))
             dump(scaler_y, str(scaler_y_path))
-            print(f"   => Đã lưu checkpoint & scalers mới (Val RMSE: {best_val_rmse:.4f})")
+            print(f"   ⭐ Đã ghi nhận mô hình tốt nhất mới (Val RMSE: {best_val_rmse:.4f})")
             
+    print("\n💾 [BƯỚC 6/6] Đang xuất file Metadata và chốt hạ mô hình...")
     model.eval() 
     _save_metadata(feature_cols, target_col)
-    print(f"✅ Đã xong! Best checkpoint và scalers được lưu tại thư mục: {model_path.parent}")
+    
+    print("=" * 55)
+    print("🏆 BÁO CÁO KẾT QUẢ ĐỒ ÁN (LSTM - LOCAL PIPELINE)")
+    print("=" * 55)
+    print(f"📊 BEST VAL RMSE : {best_val_rmse:.4f}")
+    print("-" * 55)
+    print(f"✅ HOÀN TẤT! Mô hình và Scalers đã sẵn sàng tại: {model_path.parent}")
 
 if __name__ == "__main__":
     train_lstm()

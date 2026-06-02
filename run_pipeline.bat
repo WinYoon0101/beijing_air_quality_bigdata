@@ -3,16 +3,13 @@ color 0B
 echo ========================================================
 echo   HE THONG MLOPS: DU BAO PM2.5 BAC KINH
 echo ========================================================
-echo [1] Khoi dong Ha Tang Docker (MinIO, Spark, Cassandra, Grafana, Airflow)
+echo [1] Khoi dong Ha Tang Docker (MinIO, Spark, Airflow)
 echo [2] Batch historical flow (Preprocess + Bronze + Silver + Gold)
-echo [3] Ingest API realtime vao Bronze
-echo [4] Hourly ETL tao snapshot features
-echo [5] Huan luyen mo hinh AI
-echo [6] Du bao T+1 va luu Cassandra
-echo [7] Danh gia va Ve Bieu do (Evaluation)
-echo [8] FastAPI backend cho dashboard
+echo [3] Huan luyen mo hinh AI
+echo [4] Danh gia va Ve Bieu do (Evaluation)
+echo [5] Dashboard so sanh model (FastAPI)
 echo ========================================================
-set /p action="Chon chuc nang (1-8): "
+set /p action="Chon chuc nang (1-5): "
 
 if "%action%"=="1" (
     docker-compose up -d
@@ -28,16 +25,6 @@ if "%action%"=="2" (
 )
 if "%action%"=="3" (
     cd src
-    python 1_ingest_api.py
-    pause
-)
-if "%action%"=="4" (
-    cd src
-    python 2_hourly_etl.py
-    pause
-)
-if "%action%"=="5" (
-    cd src
     echo A. XGBoost
     echo B. LightGBM
     echo C. LSTM
@@ -49,23 +36,12 @@ if "%action%"=="5" (
     set TRAIN_MODEL=
     pause
 )
-if "%action%"=="6" (
-    cd src
-    echo A. XGBoost
-    echo B. LightGBM
-    set /p infer_model="Chon model suy luan realtime (A/B): "
-    if /I "%infer_model%"=="A" set FORECAST_MODEL=xgboost
-    if /I "%infer_model%"=="B" set FORECAST_MODEL=lightgbm
-    python 4_realtime_inference.py
-    set FORECAST_MODEL=
-    pause
-)
-if "%action%"=="7" (
+if "%action%"=="4" (
     cd src
     python 5_evaluate_visualize.py
     pause
 )
-if "%action%"=="8" (
+if "%action%"=="5" (
     cd src
     python main.py
     pause
