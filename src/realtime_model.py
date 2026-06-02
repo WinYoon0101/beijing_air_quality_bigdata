@@ -1,4 +1,5 @@
 import json
+import threading
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -7,18 +8,26 @@ import pandas as pd
 import xgboost as xgb
 
 from config import MODEL_LIGHTGBM_PATH, MODEL_XGBOOST_PATH
-from feature_schema import add_physical_features, normalize_pm25_column, prepare_inference_frame
+from feature_schema import (
+    enrich_realtime_row,
+    load_lightgbm_booster,
+    normalize_pm25_column,
+    predict_lightgbm,
+    prepare_inference_frame,
+)
+
+_PREDICTOR_LOCK = threading.Lock()
+_PREDICTOR_SINGLETON: "RealtimePredictor | None" = None
 
 
 class RealtimePredictor:
     def __init__(self):
         self.model_name = ""
-        self.features = []
+        self.features: list[str] = []
         self.target_col = "Target_PM2.5_next_1h"
         self._model = None
-        # Lưu 2 dòng gần nhất theo station để tính lag/rolling realtime.
+        self._predict_lock = threading.Lock()
         self._history_by_station: dict[str, deque[dict]] = defaultdict(lambda: deque(maxlen=2))
-        # Lưu running sum cho cum_wspm theo station.
         self._cum_wspm_by_station: dict[str, float] = defaultdict(float)
         self._load_model()
 
@@ -43,13 +52,14 @@ class RealtimePredictor:
     def _load_model(self):
         metadata = self._load_metadata()
         self.model_name = str(metadata["model_name"]).lower()
-        self.features = list(metadata["feature_columns"])
         self.target_col = metadata.get("target_col", self.target_col)
 
         if self.model_name == "lightgbm":
             if not MODEL_LIGHTGBM_PATH.exists():
                 raise FileNotFoundError(f"Thiếu model LightGBM: {MODEL_LIGHTGBM_PATH}")
-            self._model = lgb.Booster(model_file=str(MODEL_LIGHTGBM_PATH))
+            self._model = load_lightgbm_booster(MODEL_LIGHTGBM_PATH)
+            self.features = list(self._model.feature_name()) or list(metadata["feature_columns"])
+            self._model_mtime = MODEL_LIGHTGBM_PATH.stat().st_mtime
             return
 
         if self.model_name == "xgboost":
@@ -58,72 +68,63 @@ class RealtimePredictor:
             model = xgb.Booster()
             model.load_model(str(MODEL_XGBOOST_PATH))
             self._model = model
+            self.features = list(model.feature_names) or list(metadata["feature_columns"])
             return
 
         raise ValueError(f"Model chưa hỗ trợ realtime: {self.model_name}")
 
-    @staticmethod
-    def _safe_float(value, default=0.0) -> float:
-        try:
-            if value is None:
-                return float(default)
-            return float(value)
-        except Exception:
-            return float(default)
+    def reload_model_if_changed(self):
+        if self.model_name != "lightgbm":
+            return
+        current_mtime = MODEL_LIGHTGBM_PATH.stat().st_mtime
+        cached_mtime = getattr(self, "_model_mtime", None)
+        if cached_mtime is None or cached_mtime != current_mtime:
+            with self._predict_lock:
+                self._load_model()
+                self._model_mtime = current_mtime
 
-    def _enrich_one_event(self, row: dict) -> dict:
-        """
-        Enrich 1 event với:
-        - physical features (hour_sin/cos, month_sin/cos, vapor pressure)
-        - lag_1, lag_2 cho các numeric columns có trong row
-        - rolling_2 cho các numeric columns (mean của [prev, current]) nếu có prev
-        - cum_wspm: running sum theo station
+    def _enrich_batch(self, frame: pd.DataFrame) -> pd.DataFrame:
+        base = normalize_pm25_column(frame)
+        enriched_rows = []
 
-        Với event đầu tiên: lag_1/lag_2/rolling_2 = 0 (theo yêu cầu demo).
-        """
-        station = str(row.get("station") or "")
-        history = self._history_by_station[station]
-        prev1 = history[-1] if len(history) >= 1 else None
-        prev2 = history[-2] if len(history) >= 2 else None
+        for raw_row in base.to_dict(orient="records"):
+            station = str(raw_row.get("station") or "")
+            history = self._history_by_station[station]
+            prev1 = history[-1] if len(history) >= 1 else None
+            prev2 = history[-2] if len(history) >= 2 else None
 
-        enriched = dict(row)
+            wspm = float(raw_row.get("WSPM") or 0.0)
+            self._cum_wspm_by_station[station] += wspm
+            cum_wspm = self._cum_wspm_by_station[station]
 
-        # cum_wspm (giống Spark: sum(WSPM) over time)
-        wspm = self._safe_float(row.get("WSPM"), 0.0)
-        self._cum_wspm_by_station[station] += wspm
-        enriched["cum_wspm"] = float(self._cum_wspm_by_station[station])
+            enriched, snapshot = enrich_realtime_row(raw_row, prev1, prev2, cum_wspm)
+            history.append(snapshot)
+            enriched_rows.append(enriched)
 
-        # Tính lag/rolling cho numeric keys có trong row (tránh station/wd/time cols)
-        excluded = {"No", "year", "month", "day", "hour", "station", "wd"}
-        for key, value in row.items():
-            if key in excluded:
-                continue
-            # Chỉ làm cho numeric
-            cur = self._safe_float(value, 0.0)
-            p1 = self._safe_float(prev1.get(key), 0.0) if prev1 else 0.0
-            p2 = self._safe_float(prev2.get(key), 0.0) if prev2 else 0.0
-
-            enriched[f"{key}_lag_1"] = float(p1) if prev1 else 0.0
-            enriched[f"{key}_lag_2"] = float(p2) if prev2 else 0.0
-            enriched[f"{key}_rolling_2"] = float((p1 + cur) / 2.0) if prev1 else 0.0
-
-        # Cập nhật history (lưu raw values để tính lag cho lần sau)
-        history.append(dict(row))
-        return enriched
+        return pd.DataFrame(enriched_rows)
 
     def predict(self, frame: pd.DataFrame):
-        # Normalize column name PM2.5 -> PM2_5 để đồng nhất nội bộ
-        base = normalize_pm25_column(frame)
+        self.reload_model_if_changed()
+        enriched_df = self._enrich_batch(frame)
 
-        # Enrich theo thứ tự thời gian nhận được (micro-batch có thể > 1 row)
-        enriched_rows = [self._enrich_one_event(row) for row in base.to_dict(orient="records")]
-        enriched_df = pd.DataFrame(enriched_rows)
+        with self._predict_lock:
+            if self.model_name == "lightgbm":
+                return predict_lightgbm(self._model, enriched_df)
+            infer_df = prepare_inference_frame(
+                enriched_df,
+                self.features,
+                self.model_name,
+            )
+            numeric_df = infer_df.reindex(columns=self.features, fill_value=0).select_dtypes(
+                include=["number"]
+            )
+            return self._model.predict(xgb.DMatrix(numeric_df))
 
-        # Physical features (giống batch ETL) - chạy sau enrich để có hour/month/TEMP/DEWP sẵn.
-        enriched_df = add_physical_features(enriched_df)
 
-        infer_df = prepare_inference_frame(enriched_df, self.features, self.model_name).fillna(0)
-        if self.model_name == "xgboost":
-            dmatrix = xgb.DMatrix(infer_df)
-            return self._model.predict(dmatrix)
-        return self._model.predict(infer_df)
+def get_realtime_predictor() -> RealtimePredictor:
+    global _PREDICTOR_SINGLETON
+    if _PREDICTOR_SINGLETON is None:
+        with _PREDICTOR_LOCK:
+            if _PREDICTOR_SINGLETON is None:
+                _PREDICTOR_SINGLETON = RealtimePredictor()
+    return _PREDICTOR_SINGLETON

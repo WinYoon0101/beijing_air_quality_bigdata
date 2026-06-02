@@ -28,7 +28,16 @@ from config import (
     MODEL_METRICS_PATH,
     MODEL_XGBOOST_PATH,
 )
-from feature_schema import add_next_hour_target, normalize_pm25_column, sort_by_time
+from feature_schema import (
+    add_next_hour_target,
+    load_lightgbm_booster,
+    normalize_pm25_column,
+    prepare_lightgbm_frame,
+    sort_by_time,
+)
+
+_LIGHTGBM_BOOSTER_CACHE = None
+_LIGHTGBM_MODEL_MTIME = None
 
 
 class LSTMModel(nn.Module):
@@ -63,18 +72,24 @@ def load_gold_frame():
     return sort_by_time(normalize_pm25_column(df))
 
 
-def _predict_lightgbm(df_input):
+def _get_cached_lightgbm_booster():
+    global _LIGHTGBM_BOOSTER_CACHE, _LIGHTGBM_MODEL_MTIME
     if not Path(MODEL_LIGHTGBM_PATH).exists():
         return None
-    model = lgb.Booster(model_file=str(MODEL_LIGHTGBM_PATH))
+    current_mtime = MODEL_LIGHTGBM_PATH.stat().st_mtime
+    if _LIGHTGBM_BOOSTER_CACHE is None or _LIGHTGBM_MODEL_MTIME != current_mtime:
+        _LIGHTGBM_BOOSTER_CACHE = load_lightgbm_booster(MODEL_LIGHTGBM_PATH)
+        _LIGHTGBM_MODEL_MTIME = current_mtime
+    return _LIGHTGBM_BOOSTER_CACHE
+
+
+def _predict_lightgbm(df_input):
+    model = _get_cached_lightgbm_booster()
+    if model is None:
+        return None
     expected_features = list(model.feature_name())
-    df_input = df_input.reindex(columns=expected_features, fill_value=0)
-    for col in expected_features:
-        if col in {"station", "wd", "station_lag_1", "station_lag_2", "wd_lag_1", "wd_lag_2"}:
-            df_input[col] = df_input[col].astype(str).astype("category")
-        else:
-            df_input[col] = pd.to_numeric(df_input[col], errors="coerce").fillna(0)
-    return model.predict(df_input)
+    frame = prepare_lightgbm_frame(df_input, expected_features, booster=model)
+    return model.predict(frame)
 
 
 def _predict_xgboost(df_input):

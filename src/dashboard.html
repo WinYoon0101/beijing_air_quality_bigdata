@@ -31,6 +31,23 @@
         radial-gradient(circle at top right, rgba(139, 92, 246, 0.22), transparent 28%),
         linear-gradient(180deg, #050a15 0%, var(--bg) 100%);
     }
+
+    /* --- Tùy chỉnh thanh cuộn --- */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(148, 163, 184, 0.2);
+      border-radius: 10px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(148, 163, 184, 0.4);
+    }
+
     .container {
       width: min(1400px, calc(100% - 32px));
       margin: 0 auto;
@@ -220,12 +237,28 @@
     }
     .kpi .meta-label { font-size: 11px; }
     .kpi .meta-value { font-size: 18px; margin-top: 8px; }
+
+    /* --- CSS CHO BẢNG CUỘN --- */
+    .table-scroll-wrap {
+      max-height: 420px;
+      overflow-y: auto;
+      margin-top: 10px;
+      padding-right: 4px;
+    }
     .realtime-table {
       width: 100%;
       border-collapse: collapse;
       min-width: 560px;
     }
     .realtime-table th, .realtime-table td { padding: 12px 10px; }
+    .realtime-table th {
+      position: sticky;
+      top: 0;
+      background: rgba(12, 21, 38, 0.98); /* Ghim header với nền tối */
+      z-index: 10;
+      box-shadow: 0 1px 0 var(--line);
+    }
+
     .pill {
       display: inline-flex;
       gap: 8px;
@@ -245,7 +278,6 @@
     .chart-wrap.tall { height: 380px; }
     .chart-wrap.small { height: 220px; }
     
-    /* --- ĐÃ SỬA LỖI TRÀN VIỀN (RESPONSIVE GRID) --- */
     .comparison-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
@@ -263,11 +295,10 @@
     }
     .model-chart-grid {
       display: flex;
-      flex-direction: column; /* Ép 2 biểu đồ xếp dọc từ trên xuống dưới */
-      gap: 24px; /* Khoảng cách giữa biểu đồ Scatter và Histogram */
+      flex-direction: column;
+      gap: 24px;
       width: 100%;
     }
-    /* ---------------------------------------------- */
 
     .table-card { padding: 18px; margin-top: 16px; overflow: auto; }
     table { width: 100%; border-collapse: collapse; min-width: 640px; }
@@ -395,7 +426,8 @@
           <button class="btn secondary" id="rtClearBtn">Clear</button>
         </div>
         <div class="subtext">Bảng tự cập nhật khi có event mới.</div>
-        <div style="overflow:auto; margin-top:10px;">
+        
+        <div class="table-scroll-wrap">
           <table class="realtime-table">
             <thead>
               <tr>
@@ -411,6 +443,7 @@
             </tbody>
           </table>
         </div>
+
       </div>
     </section>
 
@@ -499,6 +532,7 @@
       grid: 'rgba(148, 163, 184, 0.16)',
       text: '#e5eefc',
       muted: '#94a3b8',
+      accent: '#53d3ff'
     };
     const modelColor = { XGBoost: colors.xgb, LightGBM: colors.lgb, LSTM: colors.lstm };
 
