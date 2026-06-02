@@ -16,3 +16,4 @@ uvicorn
 requests
 pyarrow
 optuna
+kafka-python

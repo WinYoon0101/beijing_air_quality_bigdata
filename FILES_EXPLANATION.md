@@ -2,17 +2,17 @@
 
 Dưới đây là tóm tắt vai trò của từng file/folder chính trong workspace.
 
-- `docker-compose.yml`: cấu hình Docker Compose khởi tạo MinIO, Spark master/worker, Cassandra, Grafana và Airflow.
+- `docker-compose.yml`: cấu hình Docker Compose khởi tạo MinIO, Spark master/worker, Cassandra, Grafana, Airflow **và Kafka/Zookeeper** (phục vụ luồng realtime).
 - `requirements.txt`: danh sách thư viện Python cần cài (pandas, pyspark, lightgbm, torch,...).
 - `run_pipeline.bat`: batch script Windows cung cấp menu tương tác để khởi động Docker, chạy pipeline, huấn luyện và inference.
-- `src/dashboard.html`: giao diện web dashboard hiện đại với tab forecast và tab so sánh model.
+- `src/dashboard.html`: giao diện web dashboard hiện đại: **so sánh model** + **realtime prediction** (WebSocket + mini-chart + realtime log).
 
 Folder `data/`:
 - `data/raw/`: chứa các file CSV thô (ví dụ PRSA_Data_*.csv).
 - `data/airquality_data.csv`: file đầu ra sau bước tiền xử lý nằm ở level local, đã chuẩn hóa cột `PM2_5` và thứ tự thời gian trước khi được đẩy lên Bronze.
 
 - `evaluation_data.py`: logic đánh giá model dùng chung cho API và script visualize.
-- `main.py`: FastAPI dashboard so sánh model (`/api/model-comparison`).
+- `main.py`: FastAPI dashboard so sánh model + realtime endpoints (`/api/model-comparison`, `WS /ws/predictions`).
 
 File model:
 - `model_lightgbm_pm25.txt`, `model_xgboost_pm25.json`, `model_lstm_pm25.pth`: các file model đã được lưu sẵn (nếu có) trong repo.
@@ -38,5 +38,10 @@ Ghi chú quan trọng:
 | `src/5_evaluate_visualize.py` | Evaluate models and create metrics/plots | `gold/features.parquet` | `src/model_metrics.json`, PNG plots in `src/` |
 | `src/main.py` | FastAPI model comparison dashboard | Gold + models via `evaluation_data` | `/api/model-comparison`, serves `dashboard.html` |
 | `src/config.py` | Central config (paths, credentials) | Environment vars / defaults | Constants used by scripts (paths, endpoints) |
+| `src/realtime_model.py` | Load model + metadata for realtime inference | `metadata_*.json` + model files | Predictor dùng trong Spark streaming |
+| `src/6_kafka_producer_simulator.py` | Kafka producer giả lập 1s/dòng | `data/airquality_data.csv` | Kafka topic realtime |
+| `src/7_spark_streaming_online_predict.py` | Spark Structured Streaming consumer: predict + ghi Bronze live | Kafka topic + model | `bronze/live_stream` (parquet) + `src/live_predictions.jsonl` |
+| `src/8_merge_live_into_bronze.py` | Gộp live Bronze vào historical Bronze để retrain | `bronze/live_stream` + `bronze/airquality_data.csv` | cập nhật `bronze/airquality_data.csv` |
+| `airflow/dags/pm25_daily_retraining_dag.py` | Airflow DAG retrain daily từ historical + live | N/A | Gold + model files + metrics |
 
 Refer to these files when tracing a record from raw → Bronze → Gold → prediction.

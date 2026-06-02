@@ -10,6 +10,7 @@ Khi test dự án, cần xác nhận các điểm sau:
 - Airflow mở được giao diện web và DAG chạy đúng.
 - `5_evaluate_visualize.py` tạo `model_metrics.json` và biểu đồ PNG.
 - FastAPI dashboard hiển thị so sánh MAE, RMSE, R², scatter và timeline (giống script evaluate).
+- Dashboard hiển thị **Realtime Prediction** và nhận dữ liệu qua WebSocket `WS /ws/predictions`.
 
 ---
 
@@ -26,6 +27,7 @@ Nếu bạn chạy stack bằng `docker-compose.yml`, các service sẽ mở ở
 | FastAPI Dashboard | http://localhost:8000 | Trang dashboard chính của dự án |
 | Spark Master UI | http://localhost:8080 | Xem trạng thái Spark master |
 | Cassandra | localhost:9042 | Không có giao diện web; dùng `cqlsh` hoặc tool CQL client |
+| Kafka | localhost:9092 | Kafka broker cho luồng realtime |
 
 ---
 
@@ -151,10 +153,11 @@ http://localhost:8000
 Cần xác nhận:
 
 - Dashboard HTML tải được.
-- Tab dự báo giờ tiếp theo mở được.
-- Tab so sánh model mở được.
+- So sánh model mở được.
+- Khối **Realtime prediction** hiển thị trạng thái kết nối (WebSocket online/disconnected).
 - Có thể chọn station từ dropdown.
 - Nút refresh hoặc reload dữ liệu hoạt động.
+- Realtime log tự cập nhật khi có event mới.
 
 ### 4.6 Spark Master UI
 
@@ -280,6 +283,36 @@ Kết quả cần kiểm tra:
 - Dashboard tải thành công với biểu đồ MAE, RMSE, R².
 - Có đường Actual vs Predicted và scatter / phân phối lỗi từng model.
 - API `GET /api/stations` và `GET /api/model-comparison` trả dữ liệu hợp lệ.
+- Endpoint realtime:
+  - `GET /api/live-predictions?limit=50` trả về các item (nếu Spark streaming đang chạy).
+  - WebSocket `ws://localhost:8000/ws/predictions` đẩy event realtime.
+
+### Bước 7: Test realtime online predicting (Kafka → Spark → Dashboard)
+
+Điều kiện:
+- Kafka + Zookeeper đang chạy (trong `docker-compose.yml`).
+- Đã train model để có file model + metadata trong `src/`.
+
+Chạy Spark streaming consumer:
+
+```powershell
+cd src
+python 7_spark_streaming_online_predict.py
+```
+
+Chạy Kafka producer giả lập (mặc định 1000 dòng synthetic, nhanh để demo):
+
+```powershell
+cd src
+python 6_kafka_producer_simulator.py
+```
+
+> Luu y: script producer nay **khong can** `data/airquality_data.csv` hay du lieu historal - tu sinh 1000 dong synthetic de demo realtime.
+
+Mở dashboard `http://localhost:8000` và quan sát:
+- Khối **Realtime prediction** chuyển sang trạng thái WebSocket online.
+- Realtime log có dòng mới.
+- Mini chart realtime cập nhật liên tục.
 
 ---
 
@@ -332,6 +365,8 @@ Sau đó mở các link sau để kiểm tra:
 - `http://localhost:8000/api/model-comparison`
 - `http://localhost:8000/api/model-comparison?station=Aotizhongxin`
 - `http://localhost:8000/api/metrics-file`
+- `http://localhost:8000/api/live-predictions?limit=50`
+- `ws://localhost:8000/ws/predictions`
 
 ---
 
@@ -343,6 +378,7 @@ Một lần test được xem là thành công khi:
 - Airflow mở được và DAG `pm25_historical_training` chạy được.
 - `model_metrics.json` và biểu đồ PNG được tạo sau evaluate.
 - Dashboard FastAPI hiển thị so sánh model đầy đủ.
+- Dashboard hiển thị realtime prediction khi chạy Kafka + Spark streaming.
 
 ---
 
@@ -389,4 +425,4 @@ Sau đó mở các link:
 - Airflow: http://localhost:8081
 - Dashboard: http://localhost:8000
 
-Nếu cần, xem thêm `README.md` và `THUYET_TRINH_DU_AN.md`.
+

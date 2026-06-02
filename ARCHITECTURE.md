@@ -7,9 +7,11 @@ Kiến trúc tập trung vào luồng batch lịch sử: xây lakehouse, huấn 
 - `data/raw/`: nguồn CSV lịch sử.
 - MinIO: Bronze, Silver, Gold.
 - Spark / batch ETL: xử lý dữ liệu lịch sử.
+- Kafka: ingest dữ liệu realtime (producer/consumer).
+- Spark Structured Streaming: dự báo realtime + ghi Bronze live.
 - XGBoost / LightGBM / LSTM: huấn luyện và so sánh model.
-- FastAPI: dashboard so sánh model.
-- Airflow: điều phối DAG `pm25_historical_training`.
+- FastAPI: dashboard so sánh model + realtime WebSocket.
+- Airflow: điều phối DAG `pm25_historical_training` và DAG daily retraining.
 
 ## Luồng dữ liệu
 
@@ -63,4 +65,27 @@ flowchart LR
     DAG -.-> BATCH_ETL
     DAG -.-> TRAIN
     DAG -.-> EVAL
+```
+
+## Online Predicting + Retraining (Batch + Speed Layer)
+
+```mermaid
+flowchart TD
+    %% Batch Layer (Retraining)
+    subgraph Batch Layer [Airflow Orchestrated - Daily Retraining]
+        HIST[Historical CSV] --> B_BRONZE[Bronze]
+        B_BRONZE --> B_SILVER[Silver]
+        B_SILVER --> B_GOLD[Gold]
+        B_GOLD --> TRAIN[Retrain XGBoost/LightGBM]
+        TRAIN --> MINIO_MODEL[(MinIO Model Registry)]
+    end
+
+    %% Speed/Online Layer (Streaming)
+    subgraph Speed Layer [Real-time Streaming]
+        SIM[Kafka Producer<br/>Gia lap 1s/dong] --> KAFKA[Kafka Topic]
+        KAFKA --> SPARK_STREAM[Spark Streaming<br/>Consumer]
+        MINIO_MODEL -.-> |Load model| SPARK_STREAM
+        SPARK_STREAM --> |Du bao Realtime| API[FastAPI WebSockets]
+        SPARK_STREAM --> |Luu data live| B_BRONZE
+    end
 ```

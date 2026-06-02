@@ -18,6 +18,8 @@ BUCKET_NAME = os.getenv("BUCKET_NAME", "air-quality-lake")
 BRONZE_PATH = f"s3a://{BUCKET_NAME}/bronze/airquality_data.csv"
 SILVER_PATH = f"s3a://{BUCKET_NAME}/silver/cleaned_data.parquet"
 GOLD_PATH = f"s3a://{BUCKET_NAME}/gold/features.parquet"
+BRONZE_LIVE_PATH = f"s3a://{BUCKET_NAME}/bronze/live_stream"
+BRONZE_LIVE_CHECKPOINT = f"s3a://{BUCKET_NAME}/bronze/_checkpoints/live_stream"
 
 
 # Đường dẫn model và metadata
@@ -27,3 +29,10 @@ MODEL_LIGHTGBM_PATH = MODEL_DIR / "model_lightgbm_pm25.txt"
 MODEL_LSTM_PATH = MODEL_DIR / "model_lstm_pm25.pth"
 MODEL_METADATA_PATH = MODEL_DIR / "model_metadata.json"
 MODEL_METRICS_PATH = MODEL_DIR / "model_metrics.json"
+
+
+# Cấu hình Streaming / Online Predicting
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "pm25_realtime")
+STREAM_BATCH_SECONDS = int(os.getenv("STREAM_BATCH_SECONDS", "5"))
+LIVE_PREDICTIONS_PATH = MODEL_DIR / "live_predictions.jsonl"

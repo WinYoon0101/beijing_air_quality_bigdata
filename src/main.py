@@ -1,9 +1,12 @@
 from datetime import datetime
 from pathlib import Path
+import asyncio
+import json
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
+from config import LIVE_PREDICTIONS_PATH
 from evaluation_data import build_evaluation_payload, load_gold_frame, load_metrics_file
 
 app = FastAPI(title="PM2.5 Model Evaluation Dashboard", version="2.0.0")
@@ -37,6 +40,43 @@ def health():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
 
+def _read_live_prediction_tail(limit: int = 100):
+    if not LIVE_PREDICTIONS_PATH.exists():
+        return []
+    lines = LIVE_PREDICTIONS_PATH.read_text(encoding="utf-8").splitlines()
+    selected = lines[-limit:]
+    parsed = []
+    for line in selected:
+        try:
+            parsed.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return parsed
+
+
+def _read_new_predictions_from_offset(offset: int):
+    if not LIVE_PREDICTIONS_PATH.exists():
+        return [], offset
+
+    file_size = LIVE_PREDICTIONS_PATH.stat().st_size
+    if offset > file_size:
+        offset = 0
+
+    payloads = []
+    with LIVE_PREDICTIONS_PATH.open("r", encoding="utf-8") as fp:
+        fp.seek(offset)
+        for line in fp:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payloads.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        new_offset = fp.tell()
+    return payloads, new_offset
+
+
 @app.get("/api/stations")
 def stations():
     station_list = _load_station_options()
@@ -47,6 +87,25 @@ def stations():
 def metrics_file():
     """Metrics đã lưu từ `5_evaluate_visualize.py` (toàn bộ test set)."""
     return load_metrics_file()
+
+
+@app.get("/api/live-predictions")
+def live_predictions(limit: int = Query(default=100, ge=1, le=1000)):
+    return {"items": _read_live_prediction_tail(limit=limit)}
+
+
+@app.websocket("/ws/predictions")
+async def predictions_ws(websocket: WebSocket):
+    await websocket.accept()
+    offset = 0
+    try:
+        while True:
+            new_items, offset = _read_new_predictions_from_offset(offset)
+            for payload in new_items:
+                await websocket.send_json(payload)
+            await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        return
 
 
 @app.get("/api/model-comparison")

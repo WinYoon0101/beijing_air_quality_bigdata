@@ -161,6 +161,85 @@
       gap: 16px;
       margin-bottom: 20px;
     }
+    .realtime-grid {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    .realtime-card { padding: 18px; }
+    .realtime-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    .realtime-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.03);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.6);
+      box-shadow: 0 0 0 6px rgba(148, 163, 184, 0.10);
+    }
+    .dot.ok {
+      background: rgba(34, 197, 94, 0.95);
+      box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.16);
+    }
+    .dot.bad {
+      background: rgba(248, 113, 113, 0.95);
+      box-shadow: 0 0 0 6px rgba(248, 113, 113, 0.16);
+    }
+    .realtime-kpis {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-top: 10px;
+    }
+    .kpi {
+      padding: 14px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.03);
+      min-width: 0;
+    }
+    .kpi .meta-label { font-size: 11px; }
+    .kpi .meta-value { font-size: 18px; margin-top: 8px; }
+    .realtime-table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 560px;
+    }
+    .realtime-table th, .realtime-table td { padding: 12px 10px; }
+    .pill {
+      display: inline-flex;
+      gap: 8px;
+      align-items: center;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(83, 211, 255, 0.10);
+      color: #bfefff;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
     .chart-card { padding: 18px; }
     .chart-wrap { position: relative; height: 300px; }
     .chart-wrap.tall { height: 380px; }
@@ -217,6 +296,7 @@
     
     @media (max-width: 1080px) {
       .hero, .metrics-row { grid-template-columns: 1fr; }
+      .realtime-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 800px) {
       .model-chart-grid {
@@ -268,6 +348,71 @@
       </div>
       <span class="badge" id="comparisonUpdated">Đang tải...</span>
     </div>
+
+    <section class="realtime-grid">
+      <div class="chart-card realtime-card">
+        <div class="realtime-header">
+          <div>
+            <div class="meta-label">Realtime prediction</div>
+            <div class="subtext">
+              Nhận dự báo trực tiếp qua <code>WS /ws/predictions</code>, fallback bằng <code>GET /api/live-predictions</code>.
+            </div>
+          </div>
+          <div class="realtime-status" id="rtStatus">
+            <span class="dot" id="rtDot"></span>
+            <span id="rtStatusText">Đang kết nối</span>
+          </div>
+        </div>
+
+        <div class="realtime-kpis">
+          <div class="kpi">
+            <div class="meta-label">Model</div>
+            <div class="meta-value" id="rtModel">--</div>
+          </div>
+          <div class="kpi">
+            <div class="meta-label">PM2.5 dự báo +1h</div>
+            <div class="meta-value" id="rtPred">--</div>
+          </div>
+          <div class="kpi">
+            <div class="meta-label">Station · Thời điểm</div>
+            <div class="meta-value" id="rtMeta">--</div>
+          </div>
+        </div>
+
+        <div style="margin-top:14px;">
+          <div class="section-title">
+            <h2 style="font-size:18px;">Realtime trend</h2>
+            <span class="pill" id="rtCount">0 events</span>
+          </div>
+          <div class="subtext">Mini chart hiển thị PM2.5 dự báo (và actual nếu có) cho các event mới nhất.</div>
+          <div class="chart-wrap small" style="margin-top:10px;"><canvas id="realtimeChart"></canvas></div>
+        </div>
+      </div>
+
+      <div class="table-card realtime-card" style="margin-top:0;">
+        <div class="section-title">
+          <h2>Realtime log</h2>
+          <button class="btn secondary" id="rtClearBtn">Clear</button>
+        </div>
+        <div class="subtext">Bảng tự cập nhật khi có event mới.</div>
+        <div style="overflow:auto; margin-top:10px;">
+          <table class="realtime-table">
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Station</th>
+                <th>Actual</th>
+                <th>Pred +1h</th>
+                <th>Model</th>
+              </tr>
+            </thead>
+            <tbody id="realtimeTableBody">
+              <tr><td colspan="5">Chưa có dữ liệu realtime.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
 
     <div class="metrics-row">
       <div class="chart-card">
@@ -341,12 +486,12 @@
     </div>
 
     <div class="footer-note">
-      FastAPI · GET /api/stations · GET /api/model-comparison · GET /api/metrics-file
+      FastAPI · GET /api/stations · GET /api/model-comparison · GET /api/metrics-file · WS /ws/predictions
     </div>
   </main>
 
   <script>
-    const state = { charts: {} };
+    const state = { charts: {}, realtime: { items: [], ws: null } };
     const colors = {
       xgb: '#53d3ff',
       lgb: '#22c55e',
@@ -513,6 +658,51 @@
       });
     }
 
+    function createRealtimeChart(canvasId, items) {
+      destroyChart(canvasId);
+      const sliced = (items || []).slice(-80);
+      const labels = sliced.map((it) => {
+        const d = new Date(it.timestamp || it.time || it.ts || '');
+        if (!Number.isNaN(d.getTime())) {
+          return d.toLocaleString('vi-VN', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        }
+        const hour = it.hour !== undefined ? String(it.hour).padStart(2, '0') : '--';
+        return `${hour}:00`;
+      });
+      const preds = sliced.map((it) => Number(it.pred_pm25_next_1h ?? it.pred ?? it.predicted ?? null));
+      const actual = sliced.map((it) => Number(it.actual_pm25 ?? it.actual ?? null));
+      const hasActual = actual.some(v => Number.isFinite(v));
+
+      const datasets = [
+        {
+          label: 'Pred (+1h)',
+          data: preds,
+          borderColor: colors.accent,
+          borderWidth: 2.2,
+          pointRadius: 0,
+          tension: 0.3,
+        },
+      ];
+      if (hasActual) {
+        datasets.unshift({
+          label: 'Actual',
+          data: actual,
+          borderColor: 'rgba(248,250,252,0.85)',
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0.3,
+        });
+      }
+      state.charts[canvasId] = new Chart(document.getElementById(canvasId), {
+        type: 'line',
+        data: { labels, datasets },
+        options: {
+          ...baseOptions(),
+          plugins: { legend: { display: true, labels: { color: colors.text, usePointStyle: true } } },
+        },
+      });
+    }
+
     function renderMetricsTable(models) {
       const body = document.getElementById('metricsTableBody');
       if (!models.length) {
@@ -603,6 +793,7 @@
       try {
         await loadStations();
         await loadComparison();
+        await initRealtime();
       } catch (err) {
         console.error(err);
         document.getElementById('emptyState').style.display = 'block';
@@ -612,6 +803,102 @@
 
     document.getElementById('reloadBtn').addEventListener('click', () => loadComparison().catch(console.error));
     document.getElementById('stationSelect').addEventListener('change', () => loadComparison().catch(console.error));
+    document.getElementById('rtClearBtn').addEventListener('click', () => {
+      state.realtime.items = [];
+      renderRealtime();
+    });
+
+    function setRealtimeStatus(mode, label) {
+      const dot = document.getElementById('rtDot');
+      dot.classList.remove('ok', 'bad');
+      if (mode === 'ok') dot.classList.add('ok');
+      if (mode === 'bad') dot.classList.add('bad');
+      setText('rtStatusText', label);
+    }
+
+    function renderRealtime() {
+      const items = state.realtime.items || [];
+      setText('rtCount', `${items.length} events`);
+
+      const latest = items[items.length - 1];
+      if (latest) {
+        setText('rtModel', latest.model_name || '--');
+        setText('rtPred', formatNumber(latest.pred_pm25_next_1h, 2));
+        const meta = `${latest.station || '--'} · ${formatTimestamp(latest.timestamp)}`;
+        setText('rtMeta', meta);
+      } else {
+        setText('rtModel', '--');
+        setText('rtPred', '--');
+        setText('rtMeta', '--');
+      }
+
+      createRealtimeChart('realtimeChart', items);
+
+      const tbody = document.getElementById('realtimeTableBody');
+      if (!items.length) {
+        tbody.innerHTML = '<tr><td colspan="5">Chưa có dữ liệu realtime.</td></tr>';
+        return;
+      }
+
+      const rows = items.slice(-50).reverse().map((it) => `
+        <tr>
+          <td>${formatTimestamp(it.timestamp)}</td>
+          <td>${it.station ?? '--'}</td>
+          <td>${it.actual_pm25 === null || it.actual_pm25 === undefined ? '--' : formatNumber(it.actual_pm25, 2)}</td>
+          <td>${formatNumber(it.pred_pm25_next_1h, 2)}</td>
+          <td>${it.model_name ?? '--'}</td>
+        </tr>
+      `).join('');
+      tbody.innerHTML = rows;
+    }
+
+    function addRealtimeItems(newItems) {
+      if (!Array.isArray(newItems) || !newItems.length) return;
+      const merged = (state.realtime.items || []).concat(newItems);
+      // keep last 300 events
+      state.realtime.items = merged.slice(-300);
+      renderRealtime();
+    }
+
+    async function bootstrapRealtimeHistory() {
+      try {
+        const payload = await fetchJSON('/api/live-predictions?limit=200');
+        addRealtimeItems(payload.items || []);
+      } catch (err) {
+        console.warn('Không load được lịch sử realtime:', err);
+      }
+    }
+
+    function connectRealtimeWS() {
+      const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+      const url = `${scheme}://${location.host}/ws/predictions`;
+      const ws = new WebSocket(url);
+      state.realtime.ws = ws;
+
+      ws.addEventListener('open', () => setRealtimeStatus('ok', 'WebSocket online'));
+      ws.addEventListener('message', (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          addRealtimeItems([data]);
+        } catch (err) {
+          console.warn('WS message parse error:', err);
+        }
+      });
+      ws.addEventListener('close', () => {
+        setRealtimeStatus('bad', 'WebSocket disconnected');
+        // auto-reconnect
+        setTimeout(() => connectRealtimeWS(), 1500);
+      });
+      ws.addEventListener('error', () => setRealtimeStatus('bad', 'WebSocket error'));
+    }
+
+    async function initRealtime() {
+      setRealtimeStatus('', 'Đang kết nối');
+      await bootstrapRealtimeHistory();
+      renderRealtime();
+      connectRealtimeWS();
+    }
+
     init();
   </script>
 </body>

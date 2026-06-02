@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Iterable, Sequence
 
 import pandas as pd
@@ -94,5 +95,47 @@ def prepare_inference_frame(df: pd.DataFrame, features: list[str], model_name: s
         for column in LIGHTGBM_CATEGORICAL_COLUMNS:
             if column in frame.columns:
                 frame[column] = frame[column].astype("category")
+                # LightGBM có thể xử lý NaN, nhưng để demo ổn định và đồng nhất schema:
+                # thay NaN categorical bằng nhãn "unknown".
+                frame[column] = frame[column].cat.add_categories(["unknown"]).fillna("unknown")
 
+    # Chặn NaN trong numeric feature để tránh lỗi inference (đặc biệt với một số bản XGBoost/DMatrix setup).
+    numeric_cols = frame.select_dtypes(include=["number"]).columns
+    if len(numeric_cols) > 0:
+        frame[numeric_cols] = frame[numeric_cols].fillna(0)
+
+    # Còn lại các cột không phải numeric (thường là categorical với LightGBM) đã được xử lý ở trên.
     return frame
+
+
+def add_physical_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tính các đặc trưng vật lý/chu kỳ thời gian tương tự batch ETL (Spark):
+    - hour_sin, hour_cos
+    - month_sin, month_cos
+    - saturated_vapor_pressure, actual_vapor_pressure
+
+    Hàm này an toàn cho realtime (thiếu cột thì sẽ bỏ qua).
+    """
+    data = normalize_pm25_column(df).copy()
+
+    if "hour" in data.columns:
+        hour = pd.to_numeric(data["hour"], errors="coerce").fillna(0)
+        data["hour_sin"] = (2 * math.pi * hour / 24).map(math.sin)
+        data["hour_cos"] = (2 * math.pi * hour / 24).map(math.cos)
+
+    if "month" in data.columns:
+        month = pd.to_numeric(data["month"], errors="coerce").fillna(0)
+        data["month_sin"] = (2 * math.pi * month / 12).map(math.sin)
+        data["month_cos"] = (2 * math.pi * month / 12).map(math.cos)
+
+    # Công thức giống Spark ETL
+    if "TEMP" in data.columns:
+        temp = pd.to_numeric(data["TEMP"], errors="coerce")
+        data["saturated_vapor_pressure"] = 61.1 * ((7.5 * temp) / (237.3 + temp))
+
+    if "DEWP" in data.columns:
+        dewp = pd.to_numeric(data["DEWP"], errors="coerce")
+        data["actual_vapor_pressure"] = 61.1 * ((7.5 * dewp) / (237.3 + dewp))
+
+    return data
